@@ -252,6 +252,15 @@ public final class BotAutonomousPlanner {
                 botName, decision.action, decision.reason, elapsed);
         recordDecision(bot.getId(), decision.action.name(), decision.reason);
         apply(entry, decision);
+
+        // The SLM only *reports* which checklist items are done; we do the safe edit
+        // (flip the box, leave the goal text untouched).
+        if (decision.done != null && decision.done.length > 0) {
+            int checked = GoalChecklist.markDone(botName, decision.done);
+            if (checked > 0) {
+                log.info("planner[{}] checked off {} goal checklist item(s)", botName, checked);
+            }
+        }
     }
 
     /** Map a parsed decision onto the existing BotManager hooks. */

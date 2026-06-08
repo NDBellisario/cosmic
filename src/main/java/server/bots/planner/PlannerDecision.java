@@ -17,11 +17,14 @@ final class PlannerDecision {
     final PlannerAction action;
     final String reason;
     final Map<String, String> params;
+    /** 1-based GOAL.md checklist item indices the SLM reports as now complete (may be empty). */
+    final int[] done;
 
-    private PlannerDecision(PlannerAction action, String reason, Map<String, String> params) {
+    private PlannerDecision(PlannerAction action, String reason, Map<String, String> params, int[] done) {
         this.action = action;
         this.reason = reason;
         this.params = params;
+        this.done = done;
     }
 
     /** Convenience accessor for an integer param, defaulting when absent/unparseable. */
@@ -52,7 +55,31 @@ final class PlannerDecision {
         if (reason == null) reason = "";
 
         Map<String, String> params = extractParams(obj);
-        return new PlannerDecision(action, reason.trim(), params);
+        int[] done = extractIntArray(obj, "done");
+        return new PlannerDecision(action, reason.trim(), params, done);
+    }
+
+    /** Extract a JSON array of ints for {@code "key"} (e.g. {@code "done":[1,3]}); empty if absent. */
+    static int[] extractIntArray(String json, String key) {
+        String needle = "\"" + key + "\"";
+        int k = json.indexOf(needle);
+        if (k < 0) return new int[0];
+        int lb = json.indexOf('[', k + needle.length());
+        if (lb < 0) return new int[0];
+        int rb = json.indexOf(']', lb);
+        if (rb < 0) return new int[0];
+        java.util.List<Integer> vals = new java.util.ArrayList<>();
+        for (String part : json.substring(lb + 1, rb).split(",")) {
+            part = part.trim();
+            if (part.isEmpty()) continue;
+            try {
+                vals.add(Integer.parseInt(part));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        int[] arr = new int[vals.size()];
+        for (int i = 0; i < arr.length; i++) arr[i] = vals.get(i);
+        return arr;
     }
 
     /** Returns the substring spanning the first balanced {@code {...}}, ignoring braces inside strings. */

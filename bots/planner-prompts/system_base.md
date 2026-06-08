@@ -18,8 +18,11 @@ Actions (choose exactly one):
 - IDLE           — do nothing this turn.
 
 Reply with ONE JSON object and nothing else:
-{"action": "<ACTION>", "reason": "<one short sentence>", "params": {}}
-Only GRIND_AT, TRAVEL_TO, and TURN_IN_QUEST use params. Never invent an action outside the list. No prose, no markdown.
+{"action": "<ACTION>", "reason": "<one short sentence>", "params": {}, "done": []}
+Only GRIND_AT, TRAVEL_TO, and TURN_IN_QUEST use params. "done" is the list of GOAL
+checklist item NUMBERS you have now completed (from the "Open checklist items" list);
+use [] when none. Never rewrite the goal text yourself. Never invent an action outside
+the list. No prose, no markdown.
 {{fewshot}}
 --- WHO YOU ARE ---
 {{soul}}

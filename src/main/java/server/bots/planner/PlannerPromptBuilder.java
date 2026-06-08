@@ -69,6 +69,16 @@ final class PlannerPromptBuilder {
 
         if (goal != null && !goal.isBlank()) {
             sb.append("Your goals for today (GOAL):\n").append(goal.trim()).append("\n\n");
+            java.util.List<GoalChecklist.Item> open = GoalChecklist.items(goal).stream()
+                    .filter(it -> !it.checked()).toList();
+            if (!open.isEmpty()) {
+                sb.append("Open checklist items (by number):\n");
+                for (GoalChecklist.Item it : open) {
+                    sb.append("  ").append(it.index()).append(". ").append(it.text()).append('\n');
+                }
+                sb.append("If you have now COMPLETED any of these, add a \"done\":[<numbers>] field to your JSON. ")
+                        .append("Do NOT rewrite the goal text — only report numbers you've finished. Omit \"done\" if none.\n\n");
+            }
         } else {
             sb.append("You have no written goals today; use your judgment.\n\n");
         }

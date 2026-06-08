@@ -39,6 +39,14 @@ public final class ContextFileLoader {
         return load(botName, "GOAL.md");
     }
 
+    /** Drop the cache entry for a file so the next load re-reads from disk
+     *  (used after GoalChecklist writes GOAL.md, in case the mtime is unchanged). */
+    static void invalidate(String botName, String fileName) {
+        if (botName == null || botName.isBlank()) return;
+        Path path = Path.of(BotLlmConfig.plannerDataDir, botName, fileName);
+        CACHE.remove(path.toAbsolutePath().toString());
+    }
+
     private static String load(String botName, String fileName) {
         if (botName == null || botName.isBlank()) return "";
         Path path = Path.of(BotLlmConfig.plannerDataDir, botName, fileName);

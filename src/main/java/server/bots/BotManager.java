@@ -4042,6 +4042,30 @@ public class BotManager {
         return out;
     }
 
+    /** Live position of one monster, for the panel mini-map. */
+    public record MapMobDto(int x, int y, String name) {}
+
+    /** Living monsters on the given map (world 0 / channel 1), for the mini-map overlay.
+     *  Best-effort read of live map state; empty if the map isn't loaded/active. */
+    public List<MapMobDto> listMapMonsters(int mapId) {
+        List<MapMobDto> out = new ArrayList<>();
+        try {
+            net.server.channel.Channel ch = Server.getInstance().getChannel(0, 1);
+            if (ch == null) return out;
+            server.maps.MapleMap map = ch.getMapFactory().getMap(mapId);
+            if (map == null) return out;
+            for (server.life.Monster m : map.getAllMonsters()) {
+                if (m == null || !m.isAlive()) continue;
+                java.awt.Point p = m.getPosition();
+                if (p == null) continue;
+                out.add(new MapMobDto(p.x, p.y, m.getName()));
+            }
+        } catch (Throwable t) {
+            log.warn("control-api: listMapMonsters {} failed: {}", mapId, t.toString());
+        }
+        return out;
+    }
+
     private static String describeStatus(BotEntry e) {
         if (e.isGrinding()) return "grinding";
         if (e.isFollowing()) return "following owner";

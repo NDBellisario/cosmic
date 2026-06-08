@@ -43,6 +43,7 @@ public final class BotControlApi {
             s.createContext("/health",         BotControlApi::handleHealth);
             s.createContext("/bots/spawn",     BotControlApi::handleSpawn);
             s.createContext("/bots",           BotControlApi::handleBots);
+            s.createContext("/maps",           BotControlApi::handleMaps);
             // Single-threaded executor: all requests are brief reads + game-thread submits.
             s.setExecutor(Executors.newSingleThreadExecutor(r -> {
                 Thread t = new Thread(r, "bot-control-api");
@@ -115,6 +116,29 @@ public final class BotControlApi {
         } else if ("POST".equals(method) && path.matches("/bots/\\d+/move")) {
             int id = extractIdFromPath(path, 1);
             handleMove(ex, id);
+        } else {
+            send(ex, 404, "{\"ok\":false,\"error\":\"not found\"}");
+        }
+    }
+
+    /** GET /maps/{mapId}/mobs → [{x,y,name}, ...] live monster positions for the mini-map. */
+    private static void handleMaps(HttpExchange ex) throws IOException {
+        if (!checkAuth(ex)) return;
+        String path = ex.getRequestURI().getPath();
+        if (path.endsWith("/") && path.length() > 1) path = path.substring(0, path.length() - 1);
+        if ("GET".equalsIgnoreCase(ex.getRequestMethod()) && path.matches("/maps/\\d+/mobs")) {
+            int mapId = extractIdFromPath(path, 1);
+            List<BotManager.MapMobDto> mobs = BotManager.getInstance().listMapMonsters(mapId);
+            StringBuilder sb = new StringBuilder(mobs.size() * 40 + 2);
+            sb.append('[');
+            for (int i = 0; i < mobs.size(); i++) {
+                if (i > 0) sb.append(',');
+                BotManager.MapMobDto m = mobs.get(i);
+                sb.append("{\"x\":").append(m.x()).append(",\"y\":").append(m.y())
+                        .append(",\"name\":\"").append(jsonEscape(m.name())).append("\"}");
+            }
+            sb.append(']');
+            send(ex, 200, sb.toString());
         } else {
             send(ex, 404, "{\"ok\":false,\"error\":\"not found\"}");
         }

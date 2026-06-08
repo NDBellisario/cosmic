@@ -2080,305 +2080,24 @@ public class BotManager {
             return;
         }
 
-        // Grind mode: navigate toward nearest monster, attack when in range
+        // Grind mode: navigate toward nearest monster, attack when in range. Delegated to
+        // tickGrindCombat so the ownerless path runs the exact same battle-tested combat.
         if (entry.grinding) {
+            GrindResult gr;
             if (!perf) {
-            double seekRangeSq = (double) BotCombatManager.cfg.GRIND_SEEK_RANGE * BotCombatManager.cfg.GRIND_SEEK_RANGE;
-            Monster target = entry.grindTarget;
-            if (target == null || !target.isAlive()
-                    || target.getMap() != bot.getMap()
-                    || target.getPosition().distanceSq(botPos) > seekRangeSq) {
-                target = null;
-            }
-            long now = System.currentTimeMillis();
-            BotCombatManager.AttackPlan attackPlan = target == null
-                    ? null
-                    : BotCombatManager.planAttack(entry, bot, target);
-            // Validate cached loot target
-            if (entry.grindLootTarget != null) {
-                MapItem loot = entry.grindLootTarget;
-                if (loot.isPickedUp() || bot.getMap().getMapObject(loot.getObjectId()) != loot) {
-                    entry.grindLootTarget = null;
-                }
-            }
-            if (runAiTick && shouldSearchForGrindTarget(entry, bot, target, attackPlan, now)) {
-                Monster searchedTarget = entry.patrolRegionId >= 0
-                        ? BotCombatManager.findPatrolTarget(entry, bot)
-                        : BotCombatManager.findGrindTarget(entry, bot);
-                if (searchedTarget != null || target == null) {
-                    target = searchedTarget;
-                    attackPlan = null;
-                }
-                entry.nextGrindTargetSearchAtMs = now + BotCombatManager.cfg.GRIND_RETARGET_INTERVAL_MS;
-            }
-            // Search for a convenient loot drop every AI tick (grind mode only)
-            if (runAiTick && entry.patrolRegionId < 0) {
-                entry.grindLootTarget = BotInventoryManager.findNearestGrindLootTarget(entry, bot);
-            }
-            if (target == null) {
-                entry.grindTarget = null;
-                if (isSwimMap(entry) && entry.inAir) {
-                    BotMovementManager.tickSwimming(entry, targetPos);
-                    return;
-                } else if (entry.inAir) {
-                    BotMovementManager.tickAirborne(entry, targetPos);
-                    return;
-                } else {
-                    // No mob in seek range — pick a wander direction once and walk that way until
-                    // a mob enters range. Beats standing still and lets the bot self-relocate.
-                    if (entry.wanderDirection == 0) {
-                        entry.wanderDirection = java.util.concurrent.ThreadLocalRandom.current().nextBoolean() ? 1 : -1;
-                    }
-                    targetPos = new Point(botPos.x + entry.wanderDirection * 200, botPos.y);
-                    // falls through to stepMovementCore below
-                }
-            }
-            if (target == null) {
-                targetPos = entry.patrolRegionId >= 0
-                        ? resolvePatrolWanderTarget(entry, botPos, bot.getMap())
-                        : resolveNoGrindTargetPosition(entry, botPos, bot.getMap());
-                stepMovementCore(entry, targetPos, runAiTick);
-                return;
-            }
-            entry.grindTarget = target;
-            entry.wanderDirection = 0;
-            entry.patrolWanderTarget = null;
-            Point tp = target.getPosition();
-            Monster rangedPriorityTarget = selectPriorityRangedAttackTarget(entry, bot, botPos, target);
-            if (rangedPriorityTarget != null && rangedPriorityTarget != target) {
-                target = rangedPriorityTarget;
-                entry.grindTarget = rangedPriorityTarget;
-                tp = target.getPosition();
-                attackPlan = null;
-            }
-            // Crowding swap: if a closer mob is breaching the retreat band, attack THAT mob
-            // instead of fleeing the original far target. The bot would have retreated either
-            // way (the close mob also triggers retreat), but with the right target our shots
-            // land on the actual threat instead of pointing at the far one.
-            server.life.Monster closerThreat = rangedPriorityTarget == null
-                    ? BotAttackExecutionProvider.findCloserThreatMob(bot, botPos, tp)
-                    : null;
-            if (closerThreat != null && closerThreat != target) {
-                target = closerThreat;
-                entry.grindTarget = closerThreat;
-                tp = target.getPosition();
-                attackPlan = null;
-            }
-            if (attackPlan == null) {
-                attackPlan = BotCombatManager.planAttack(entry, bot, target);
-            }
-            WeaponType grindWeaponType = BotAttackExecutionProvider.getEquippedWeaponType(bot);
-            boolean targetInDegenerateBand = BotAttackExecutionProvider.shouldDegenerateRangedAttack(grindWeaponType, botPos, tp);
-            boolean allowOneDegenerateAttack = targetInDegenerateBand && !entry.degenAttackDone && rangedPriorityTarget == null;
-            boolean shouldRetreatForRangedSpacing = entry.degenAttackDone
-                    || (BotAttackExecutionProvider.shouldRetreatFromNearbyTarget(grindWeaponType, botPos, tp)
-                    && !allowOneDegenerateAttack);
-            // Opportunity attack: keep firing during retreat as long as the shot would land
-            // as a true ranged hit. Suppress only inside the degenerate band, since firing
-            // there would re-trigger degenAttackDone and extend the retreat indefinitely.
-            boolean canFireWithoutDegen = grindWeaponType == null
-                    || !BotAttackExecutionProvider.shouldDegenerateRangedAttack(grindWeaponType, botPos, tp);
-            boolean attackGateOpen = !shouldRetreatForRangedSpacing || canFireWithoutDegen || allowOneDegenerateAttack;
-            // Sticky cross-region retreat: pre-compute so an opportunity attack doesn't stall
-            // the traversal — bot fires AND keeps walking toward the safe vantage in the same tick.
-            Point crossRegionRetreatPos = shouldRetreatForRangedSpacing
-                    ? selectCrossRegionRetreatTarget(entry, botPos, tp)
-                    : null;
-
-            boolean attackAttemptedInRange = false;
-            if (!entry.climbing) {
-                if (attackGateOpen && BotCombatManager.isTargetInAttackRange(attackPlan, bot, target)
-                        && BotCombatManager.canUseAttackPlanNow(entry, grindWeaponType, attackPlan)) {
-                    attackAttemptedInRange = true;
-                    // In range — attack if grounded, or during ascent of a jump
-                    int prevCooldown = entry.attackCooldownMs;
-                    BotCombatManager.attackMonster(entry, bot, attackPlan);
-                    boolean attacked = entry.attackCooldownMs != prevCooldown;
-                    // If a ranged bot just did a degenerate close-range hit, force retreat next tick
-                    if (attacked && attackPlan.isCloseRangeRoute()
-                            && BotCombatManager.isRangedAmmoWeapon(grindWeaponType)) {
-                        entry.degenAttackDone = true;
-                    }
-                    // Don't short-circuit when a cross-region retreat is in progress — the
-                    // bot must still walk to the edge launch this tick.
-                    if (attacked && !entry.inAir && crossRegionRetreatPos == null) return;
-                } else if (!entry.inAir
-                        && attackPlan != null
-                        && BotCombatManager.isTargetJumpable(entry.movementProfile, attackPlan.isCloseRangeRoute(), botPos, tp)
-                        && grindWeaponType != WeaponType.BOW && grindWeaponType != WeaponType.CROSSBOW
-                        && grindWeaponType != WeaponType.WAND && grindWeaponType != WeaponType.STAFF) {
-                    // Target is above but within jump height — jump toward it
-                    BotMovementManager.initiateJump(entry, bot, tp.x - botPos.x);
-                    return;
-                }
-            }
-            // Stand still when in attack range and no retreat is needed. Walking toward the
-            // mob during cooldown drops dx into the retreat band, triggering a walk-away the
-            // next tick — produces a tight (~100 ms) left-right oscillation when the bot is
-            // already in firing position.
-            if (target != null && !entry.inAir && !entry.climbing
-                    && !shouldRetreatForRangedSpacing && crossRegionRetreatPos == null
-                    && !attackAttemptedInRange
-                    && BotCombatManager.isTargetInAttackRange(attackPlan, bot, target)) {
-                BotPhysicsEngine.idleOnGround(entry, bot);
-                BotMovementManager.broadcastMovement(entry);
-                return;
-            }
-            // Retreat positioning is a local combat adjustment, not an inter-region path target.
-            // Feeding a synthetic same-Y retreat point into nav while the monster is elsewhere
-            // can make rope/ladder bots path back onto the nearby foothold instead of toward
-            // the monster's actual region.
-            targetPos = crossRegionRetreatPos != null
-                    ? crossRegionRetreatPos
-                    : selectGrindNavigationTarget(entry, botPos, tp, shouldRetreatForRangedSpacing);
-            // Clear only once the bot has physically left the retreat zone, not after the
-            // first retreat tick — otherwise the flag resets while the bot is still overlapping
-            // and allowOneDegenerateAttack re-opens the attack gate next tick.
-            if (entry.degenAttackDone
-                    && !BotAttackExecutionProvider.shouldRetreatFromNearbyTarget(grindWeaponType, botPos, tp)) {
-                entry.degenAttackDone = false;
-            }
-            // Small detour: take a very close loot drop on the way when not retreating.
-            if (crossRegionRetreatPos == null && !shouldRetreatForRangedSpacing && entry.patrolRegionId < 0) {
-                Point lootPos = convenientLootTarget(entry, botPos, tp);
-                if (lootPos != null) targetPos = lootPos;
-            }
+                gr = tickGrindCombat(entry, bot, botPos, targetPos, runAiTick);
             } else {
                 long tGrindDispatch = System.nanoTime();
                 try {
-                double seekRangeSq = (double) BotCombatManager.cfg.GRIND_SEEK_RANGE * BotCombatManager.cfg.GRIND_SEEK_RANGE;
-                Monster target = entry.grindTarget;
-                if (target == null || !target.isAlive()
-                        || target.getMap() != bot.getMap()
-                        || target.getPosition().distanceSq(botPos) > seekRangeSq) {
-                    target = null;
-                }
-                long now = System.currentTimeMillis();
-                BotCombatManager.AttackPlan attackPlan = target == null
-                        ? null
-                        : BotCombatManager.planAttack(entry, bot, target);
-                if (entry.grindLootTarget != null) {
-                    MapItem loot = entry.grindLootTarget;
-                    if (loot.isPickedUp() || bot.getMap().getMapObject(loot.getObjectId()) != loot) {
-                        entry.grindLootTarget = null;
-                    }
-                }
-                if (runAiTick && shouldSearchForGrindTarget(entry, bot, target, attackPlan, now)) {
-                    Monster searchedTarget = entry.patrolRegionId >= 0
-                            ? BotCombatManager.findPatrolTarget(entry, bot)
-                            : BotCombatManager.findGrindTarget(entry, bot);
-                    if (searchedTarget != null || target == null) {
-                        target = searchedTarget;
-                        attackPlan = null;
-                    }
-                    entry.nextGrindTargetSearchAtMs = now + BotCombatManager.cfg.GRIND_RETARGET_INTERVAL_MS;
-                }
-                if (runAiTick && entry.patrolRegionId < 0) {
-                    entry.grindLootTarget = BotInventoryManager.findNearestGrindLootTarget(entry, bot);
-                }
-                if (target == null) {
-                    entry.grindTarget = null;
-                    if (isSwimMap(entry) && entry.inAir) {
-                        BotMovementManager.tickSwimming(entry, targetPos);
-                        return;
-                    } else if (entry.inAir) {
-                        BotMovementManager.tickAirborne(entry, targetPos);
-                        return;
-                    } else {
-                        if (entry.wanderDirection == 0) {
-                            entry.wanderDirection = java.util.concurrent.ThreadLocalRandom.current().nextBoolean() ? 1 : -1;
-                        }
-                        targetPos = new Point(botPos.x + entry.wanderDirection * 200, botPos.y);
-                    }
-                }
-                if (target == null) {
-                    targetPos = entry.patrolRegionId >= 0
-                            ? resolvePatrolWanderTarget(entry, botPos, bot.getMap())
-                            : resolveNoGrindTargetPosition(entry, botPos, bot.getMap());
-                    stepMovementCore(entry, targetPos, runAiTick);
-                    return;
-                }
-                entry.grindTarget = target;
-                entry.wanderDirection = 0;
-                entry.patrolWanderTarget = null;
-                Point tp = target.getPosition();
-                Monster rangedPriorityTarget = selectPriorityRangedAttackTarget(entry, bot, botPos, target);
-                if (rangedPriorityTarget != null && rangedPriorityTarget != target) {
-                    target = rangedPriorityTarget;
-                    entry.grindTarget = rangedPriorityTarget;
-                    tp = target.getPosition();
-                    attackPlan = null;
-                }
-                server.life.Monster closerThreat = rangedPriorityTarget == null
-                        ? BotAttackExecutionProvider.findCloserThreatMob(bot, botPos, tp)
-                        : null;
-                if (closerThreat != null && closerThreat != target) {
-                    target = closerThreat;
-                    entry.grindTarget = closerThreat;
-                    tp = target.getPosition();
-                    attackPlan = null;
-                }
-                if (attackPlan == null) {
-                    attackPlan = BotCombatManager.planAttack(entry, bot, target);
-                }
-                WeaponType grindWeaponType = BotAttackExecutionProvider.getEquippedWeaponType(bot);
-                boolean targetInDegenerateBand = BotAttackExecutionProvider.shouldDegenerateRangedAttack(grindWeaponType, botPos, tp);
-                boolean allowOneDegenerateAttack = targetInDegenerateBand && !entry.degenAttackDone && rangedPriorityTarget == null;
-                boolean shouldRetreatForRangedSpacing = entry.degenAttackDone
-                        || (BotAttackExecutionProvider.shouldRetreatFromNearbyTarget(grindWeaponType, botPos, tp)
-                        && !allowOneDegenerateAttack);
-                boolean canFireWithoutDegen = grindWeaponType == null
-                        || !BotAttackExecutionProvider.shouldDegenerateRangedAttack(grindWeaponType, botPos, tp);
-                boolean attackGateOpen = !shouldRetreatForRangedSpacing || canFireWithoutDegen || allowOneDegenerateAttack;
-                Point crossRegionRetreatPos = shouldRetreatForRangedSpacing
-                        ? selectCrossRegionRetreatTarget(entry, botPos, tp)
-                        : null;
-
-                boolean attackAttemptedInRange = false;
-                if (!entry.climbing) {
-                    if (attackGateOpen && BotCombatManager.isTargetInAttackRange(attackPlan, bot, target)
-                            && BotCombatManager.canUseAttackPlanNow(entry, grindWeaponType, attackPlan)) {
-                        attackAttemptedInRange = true;
-                        int prevCooldown = entry.attackCooldownMs;
-                        BotCombatManager.attackMonster(entry, bot, attackPlan);
-                        boolean attacked = entry.attackCooldownMs != prevCooldown;
-                        if (attacked && attackPlan.isCloseRangeRoute()
-                                && BotCombatManager.isRangedAmmoWeapon(grindWeaponType)) {
-                            entry.degenAttackDone = true;
-                        }
-                        if (attacked && !entry.inAir && crossRegionRetreatPos == null) return;
-                    } else if (!entry.inAir
-                            && attackPlan != null
-                            && BotCombatManager.isTargetJumpable(entry.movementProfile, attackPlan.isCloseRangeRoute(), botPos, tp)
-                            && grindWeaponType != WeaponType.BOW && grindWeaponType != WeaponType.CROSSBOW
-                            && grindWeaponType != WeaponType.WAND && grindWeaponType != WeaponType.STAFF) {
-                        BotMovementManager.initiateJump(entry, bot, tp.x - botPos.x);
-                        return;
-                    }
-                }
-                if (target != null && !entry.inAir && !entry.climbing
-                        && !shouldRetreatForRangedSpacing && crossRegionRetreatPos == null
-                        && !attackAttemptedInRange
-                        && BotCombatManager.isTargetInAttackRange(attackPlan, bot, target)) {
-                    BotPhysicsEngine.idleOnGround(entry, bot);
-                    BotMovementManager.broadcastMovement(entry);
-                    return;
-                }
-                targetPos = crossRegionRetreatPos != null
-                        ? crossRegionRetreatPos
-                        : selectGrindNavigationTarget(entry, botPos, tp, shouldRetreatForRangedSpacing);
-                if (entry.degenAttackDone
-                        && !BotAttackExecutionProvider.shouldRetreatFromNearbyTarget(grindWeaponType, botPos, tp)) {
-                    entry.degenAttackDone = false;
-                }
-                if (crossRegionRetreatPos == null && !shouldRetreatForRangedSpacing && entry.patrolRegionId < 0) {
-                    Point lootPos = convenientLootTarget(entry, botPos, tp);
-                    if (lootPos != null) targetPos = lootPos;
-                }
+                    gr = tickGrindCombat(entry, bot, botPos, targetPos, runAiTick);
                 } finally {
                     BotPerformanceMonitor.record("tick-grind-dispatch", System.nanoTime() - tGrindDispatch);
                 }
             }
+            if (gr.consumed()) {
+                return;
+            }
+            targetPos = gr.moveTarget();
         }
 
         if (!perf) {
@@ -2506,6 +2225,183 @@ public class BotManager {
                 && plan.route == BotCombatManager.AttackRoute.RANGED
                 && BotCombatManager.isTargetInAttackRange(plan, bot, target)
                 && BotCombatManager.canUseAttackPlanNow(entry, weaponType, plan);
+    }
+
+    /** Outcome of one grind-combat tick: either fully consumed (caller returns), or a
+     *  movement target the caller should step toward via stepMovementCore. */
+    private record GrindResult(boolean consumed, Point moveTarget) {
+        static GrindResult done() { return new GrindResult(true, null); }
+    }
+
+    /**
+     * One grind-mode combat tick: seek the nearest monster, attack in range, and
+     * jump / retreat / reposition as needed. Extracted verbatim from tickCore's grind
+     * block so BOTH the owner-driven path and the ownerless path run identical,
+     * battle-tested combat. Returns {@link GrindResult#consumed()} when it handled the
+     * tick, otherwise the movement target for the caller's stepMovementCore.
+     */
+    private GrindResult tickGrindCombat(BotEntry entry, Character bot, Point botPos, Point targetPos, boolean runAiTick) {
+        double seekRangeSq = (double) BotCombatManager.cfg.GRIND_SEEK_RANGE * BotCombatManager.cfg.GRIND_SEEK_RANGE;
+        Monster target = entry.grindTarget;
+        if (target == null || !target.isAlive()
+                || target.getMap() != bot.getMap()
+                || target.getPosition().distanceSq(botPos) > seekRangeSq) {
+            target = null;
+        }
+        long now = System.currentTimeMillis();
+        BotCombatManager.AttackPlan attackPlan = target == null
+                ? null
+                : BotCombatManager.planAttack(entry, bot, target);
+        // Validate cached loot target
+        if (entry.grindLootTarget != null) {
+            MapItem loot = entry.grindLootTarget;
+            if (loot.isPickedUp() || bot.getMap().getMapObject(loot.getObjectId()) != loot) {
+                entry.grindLootTarget = null;
+            }
+        }
+        if (runAiTick && shouldSearchForGrindTarget(entry, bot, target, attackPlan, now)) {
+            Monster searchedTarget = entry.patrolRegionId >= 0
+                    ? BotCombatManager.findPatrolTarget(entry, bot)
+                    : BotCombatManager.findGrindTarget(entry, bot);
+            if (searchedTarget != null || target == null) {
+                target = searchedTarget;
+                attackPlan = null;
+            }
+            entry.nextGrindTargetSearchAtMs = now + BotCombatManager.cfg.GRIND_RETARGET_INTERVAL_MS;
+        }
+        // Search for a convenient loot drop every AI tick (grind mode only)
+        if (runAiTick && entry.patrolRegionId < 0) {
+            entry.grindLootTarget = BotInventoryManager.findNearestGrindLootTarget(entry, bot);
+        }
+        if (target == null) {
+            entry.grindTarget = null;
+            if (isSwimMap(entry) && entry.inAir) {
+                BotMovementManager.tickSwimming(entry, targetPos);
+                return GrindResult.done();
+            } else if (entry.inAir) {
+                BotMovementManager.tickAirborne(entry, targetPos);
+                return GrindResult.done();
+            } else {
+                // No mob in seek range — pick a wander direction once and walk that way until
+                // a mob enters range. Beats standing still and lets the bot self-relocate.
+                if (entry.wanderDirection == 0) {
+                    entry.wanderDirection = java.util.concurrent.ThreadLocalRandom.current().nextBoolean() ? 1 : -1;
+                }
+                targetPos = new Point(botPos.x + entry.wanderDirection * 200, botPos.y);
+                // falls through to stepMovementCore below
+            }
+        }
+        if (target == null) {
+            targetPos = entry.patrolRegionId >= 0
+                    ? resolvePatrolWanderTarget(entry, botPos, bot.getMap())
+                    : resolveNoGrindTargetPosition(entry, botPos, bot.getMap());
+            stepMovementCore(entry, targetPos, runAiTick);
+            return GrindResult.done();
+        }
+        entry.grindTarget = target;
+        entry.wanderDirection = 0;
+        entry.patrolWanderTarget = null;
+        Point tp = target.getPosition();
+        Monster rangedPriorityTarget = selectPriorityRangedAttackTarget(entry, bot, botPos, target);
+        if (rangedPriorityTarget != null && rangedPriorityTarget != target) {
+            target = rangedPriorityTarget;
+            entry.grindTarget = rangedPriorityTarget;
+            tp = target.getPosition();
+            attackPlan = null;
+        }
+        // Crowding swap: if a closer mob is breaching the retreat band, attack THAT mob
+        // instead of fleeing the original far target. The bot would have retreated either
+        // way (the close mob also triggers retreat), but with the right target our shots
+        // land on the actual threat instead of pointing at the far one.
+        server.life.Monster closerThreat = rangedPriorityTarget == null
+                ? BotAttackExecutionProvider.findCloserThreatMob(bot, botPos, tp)
+                : null;
+        if (closerThreat != null && closerThreat != target) {
+            target = closerThreat;
+            entry.grindTarget = closerThreat;
+            tp = target.getPosition();
+            attackPlan = null;
+        }
+        if (attackPlan == null) {
+            attackPlan = BotCombatManager.planAttack(entry, bot, target);
+        }
+        WeaponType grindWeaponType = BotAttackExecutionProvider.getEquippedWeaponType(bot);
+        boolean targetInDegenerateBand = BotAttackExecutionProvider.shouldDegenerateRangedAttack(grindWeaponType, botPos, tp);
+        boolean allowOneDegenerateAttack = targetInDegenerateBand && !entry.degenAttackDone && rangedPriorityTarget == null;
+        boolean shouldRetreatForRangedSpacing = entry.degenAttackDone
+                || (BotAttackExecutionProvider.shouldRetreatFromNearbyTarget(grindWeaponType, botPos, tp)
+                && !allowOneDegenerateAttack);
+        // Opportunity attack: keep firing during retreat as long as the shot would land
+        // as a true ranged hit. Suppress only inside the degenerate band, since firing
+        // there would re-trigger degenAttackDone and extend the retreat indefinitely.
+        boolean canFireWithoutDegen = grindWeaponType == null
+                || !BotAttackExecutionProvider.shouldDegenerateRangedAttack(grindWeaponType, botPos, tp);
+        boolean attackGateOpen = !shouldRetreatForRangedSpacing || canFireWithoutDegen || allowOneDegenerateAttack;
+        // Sticky cross-region retreat: pre-compute so an opportunity attack doesn't stall
+        // the traversal — bot fires AND keeps walking toward the safe vantage in the same tick.
+        Point crossRegionRetreatPos = shouldRetreatForRangedSpacing
+                ? selectCrossRegionRetreatTarget(entry, botPos, tp)
+                : null;
+
+        boolean attackAttemptedInRange = false;
+        if (!entry.climbing) {
+            if (attackGateOpen && BotCombatManager.isTargetInAttackRange(attackPlan, bot, target)
+                    && BotCombatManager.canUseAttackPlanNow(entry, grindWeaponType, attackPlan)) {
+                attackAttemptedInRange = true;
+                // In range — attack if grounded, or during ascent of a jump
+                int prevCooldown = entry.attackCooldownMs;
+                BotCombatManager.attackMonster(entry, bot, attackPlan);
+                boolean attacked = entry.attackCooldownMs != prevCooldown;
+                // If a ranged bot just did a degenerate close-range hit, force retreat next tick
+                if (attacked && attackPlan.isCloseRangeRoute()
+                        && BotCombatManager.isRangedAmmoWeapon(grindWeaponType)) {
+                    entry.degenAttackDone = true;
+                }
+                // Don't short-circuit when a cross-region retreat is in progress — the
+                // bot must still walk to the edge launch this tick.
+                if (attacked && !entry.inAir && crossRegionRetreatPos == null) return GrindResult.done();
+            } else if (!entry.inAir
+                    && attackPlan != null
+                    && BotCombatManager.isTargetJumpable(entry.movementProfile, attackPlan.isCloseRangeRoute(), botPos, tp)
+                    && grindWeaponType != WeaponType.BOW && grindWeaponType != WeaponType.CROSSBOW
+                    && grindWeaponType != WeaponType.WAND && grindWeaponType != WeaponType.STAFF) {
+                // Target is above but within jump height — jump toward it
+                BotMovementManager.initiateJump(entry, bot, tp.x - botPos.x);
+                return GrindResult.done();
+            }
+        }
+        // Stand still when in attack range and no retreat is needed. Walking toward the
+        // mob during cooldown drops dx into the retreat band, triggering a walk-away the
+        // next tick — produces a tight (~100 ms) left-right oscillation when the bot is
+        // already in firing position.
+        if (target != null && !entry.inAir && !entry.climbing
+                && !shouldRetreatForRangedSpacing && crossRegionRetreatPos == null
+                && !attackAttemptedInRange
+                && BotCombatManager.isTargetInAttackRange(attackPlan, bot, target)) {
+            BotPhysicsEngine.idleOnGround(entry, bot);
+            BotMovementManager.broadcastMovement(entry);
+            return GrindResult.done();
+        }
+        // Retreat positioning is a local combat adjustment, not an inter-region path target.
+        // Feeding a synthetic same-Y retreat point into nav while the monster is elsewhere
+        // can make rope/ladder bots path back onto the nearby foothold instead of toward
+        // the monster's actual region.
+        targetPos = crossRegionRetreatPos != null
+                ? crossRegionRetreatPos
+                : selectGrindNavigationTarget(entry, botPos, tp, shouldRetreatForRangedSpacing);
+        // Clear only once the bot has physically left the retreat zone, not after the
+        // first retreat tick — otherwise the flag resets while the bot is still overlapping
+        // and allowOneDegenerateAttack re-opens the attack gate next tick.
+        if (entry.degenAttackDone
+                && !BotAttackExecutionProvider.shouldRetreatFromNearbyTarget(grindWeaponType, botPos, tp)) {
+            entry.degenAttackDone = false;
+        }
+        // Small detour: take a very close loot drop on the way when not retreating.
+        if (crossRegionRetreatPos == null && !shouldRetreatForRangedSpacing && entry.patrolRegionId < 0) {
+            Point lootPos = convenientLootTarget(entry, botPos, tp);
+            if (lootPos != null) targetPos = lootPos;
+        }
+        return new GrindResult(false, targetPos);
     }
 
     private void tickAnchoredFarm(BotEntry entry, Character bot, Point botPos, boolean runAiTick) {

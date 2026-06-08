@@ -4188,4 +4188,56 @@ public class BotManager {
         return true;
     }
 
+    /**
+     * Move a spawned bot to another map live (no despawn/respawn). Uses the same
+     * forceChangeMap + placeSpawnedOnlineBot path as the owner-driven spawn, which
+     * updates this.map AND both maps' player lists consistently (so mob-kill exp
+     * keeps working). The grind target is cleared so the bot re-seeks on arrival.
+     * Live only — a despawn/respawn returns the bot to its saved DB map.
+     */
+    public OwnerlessSpawnResult moveBotToMap(int botCharId, int mapId) {
+        BotEntry found = null;
+        outer:
+        for (List<BotEntry> entries : bots.values()) {
+            for (BotEntry e : entries) {
+                if (e.bot.getId() == botCharId) { found = e; break outer; }
+            }
+        }
+        if (found == null) {
+            return OwnerlessSpawnResult.fail("Bot " + botCharId + " is not spawned.");
+        }
+        final BotEntry entry = found;
+        final Character bot = entry.bot;
+        final int world = bot.getWorld();
+        final int channel = bot.getClient().getChannel();
+
+        CompletableFuture<OwnerlessSpawnResult> future = new CompletableFuture<>();
+        TimerManager.getInstance().schedule(() -> {
+            try {
+                server.maps.MapleMap targetMap = Server.getInstance().getChannel(world, channel).getMapFactory().getMap(mapId);
+                if (targetMap == null) {
+                    future.complete(OwnerlessSpawnResult.fail("Map " + mapId + " not found."));
+                    return;
+                }
+                server.maps.Portal sp = targetMap.getPortal(0);
+                Point pos = resolveSpawnPosition(targetMap,
+                        (sp != null && sp.getPosition() != null) ? sp.getPosition() : new Point(0, 0));
+                bot.forceChangeMap(targetMap, sp != null ? sp : targetMap.findClosestPortal(pos));
+                placeSpawnedOnlineBot(entry, bot, targetMap, pos);
+                entry.grindTarget = null; // re-seek on the new map
+                String mn = targetMap.getMapName() != null ? targetMap.getMapName() : "";
+                future.complete(OwnerlessSpawnResult.ok(bot.getId(), bot.getName(), targetMap.getId(), mn));
+            } catch (Exception ex) {
+                log.warn("control-api: move '{}' to map {} failed: {}", bot.getName(), mapId, ex.toString());
+                future.complete(OwnerlessSpawnResult.fail("Move failed: " + ex.getMessage()));
+            }
+        }, 0L);
+
+        try {
+            return future.get(5, TimeUnit.SECONDS);
+        } catch (Exception ex) {
+            return OwnerlessSpawnResult.fail("Move timed out.");
+        }
+    }
+
 }

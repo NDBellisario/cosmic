@@ -112,6 +112,9 @@ public final class BotControlApi {
         } else if ("POST".equals(method) && path.matches("/bots/\\d+/despawn")) {
             int id = extractIdFromPath(path, 1);
             handleDespawn(ex, id);
+        } else if ("POST".equals(method) && path.matches("/bots/\\d+/move")) {
+            int id = extractIdFromPath(path, 1);
+            handleMove(ex, id);
         } else {
             send(ex, 404, "{\"ok\":false,\"error\":\"not found\"}");
         }
@@ -167,6 +170,28 @@ public final class BotControlApi {
         } else {
             send(ex, 200, "{\"ok\":true}");
         }
+    }
+
+    /** POST /bots/{id}/move  body {"mapId":int} — live-move a spawned bot to another map. */
+    private static void handleMove(HttpExchange ex, int botCharId) throws IOException {
+        String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+        Integer mapId = extractIntField(body, "mapId");
+        if (mapId == null) {
+            send(ex, 400, "{\"ok\":false,\"error\":\"body must include {\\\"mapId\\\":int}\"}");
+            return;
+        }
+        BotManager.OwnerlessSpawnResult result = BotManager.getInstance().moveBotToMap(botCharId, mapId);
+        if (!result.success()) {
+            send(ex, 400, buildErrorJson(result.errorMessage()));
+            return;
+        }
+        StringBuilder sb = new StringBuilder(128);
+        sb.append("{\"ok\":true,\"id\":").append(result.botCharId());
+        sb.append(",\"name\":\"").append(jsonEscape(result.botName())).append("\"");
+        sb.append(",\"mapId\":").append(result.mapId());
+        sb.append(",\"mapName\":\"").append(jsonEscape(result.mapName())).append("\"");
+        sb.append("}");
+        send(ex, 200, sb.toString());
     }
 
     /** GET /bots/{id}/decisions?limit=N → [{ts,action,reason}, ...] newest-last */

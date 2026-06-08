@@ -211,6 +211,8 @@ public final class BotControlApi {
         sb.append(",\"hp\":").append(d.hp());
         sb.append(",\"maxHp\":").append(d.maxHp());
         sb.append(",\"level\":").append(d.level());
+        sb.append(",\"exp\":").append(d.exp());
+        sb.append(",\"expPercent\":").append(d.expPercent());
         sb.append(",\"status\":\"").append(jsonEscape(d.status())).append("\"");
         sb.append(",\"idle\":").append(d.idle());
         sb.append("}");

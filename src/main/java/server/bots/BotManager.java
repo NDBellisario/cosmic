@@ -4059,7 +4059,7 @@ public class BotManager {
             int mapId, String mapName,
             int x, int y,
             int hp, int maxHp,
-            int level,
+            int level, int exp, int expPercent,
             String status,
             boolean idle) {}
 
@@ -4081,9 +4081,15 @@ public class BotManager {
                     int hp = bot.getHp();
                     int maxHp = bot.getCurrentMaxHp();
                     int level = bot.getLevel();
+                    int exp = Math.max(0, bot.getExp());
+                    int expPercent = -1;
+                    try {
+                        int needed = level < 200 ? constants.game.ExpTable.getExpNeededForLevel(level) : 0;
+                        if (needed > 0) expPercent = (int) Math.min(99, (100L * exp) / needed);
+                    } catch (Throwable ignored) {}
                     String status = describeStatus(e);
                     boolean idle = e.isIdleForPlanner();
-                    out.add(new BotStateDto(bot.getId(), bot.getName(), mapId, mapName, x, y, hp, maxHp, level, status, idle));
+                    out.add(new BotStateDto(bot.getId(), bot.getName(), mapId, mapName, x, y, hp, maxHp, level, exp, expPercent, status, idle));
                 } catch (Throwable t) {
                     log.warn("control-api: error reading bot state for {}: {}", bot.getName(), t.toString());
                 }
@@ -4169,6 +4175,7 @@ public class BotManager {
                 Point base = (portal != null && portal.getPosition() != null)
                         ? portal.getPosition() : new Point(0, 0);
                 botChar.setPosition(resolveSpawnPosition(actualMap, base));
+                // Use the bot's own charId as the sentinel ownerCharId; owner == null.
                 // Use the bot's own charId as the sentinel ownerCharId; owner == null.
                 registerBotInternal(botChar.getId(), null, botChar, true);
 

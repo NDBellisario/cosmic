@@ -1894,6 +1894,21 @@ public class BotManager {
                 if (!gr.consumed()) {
                     stepMovementCore(entry, gr.moveTarget(), runAiTick);
                 }
+                // Reach-timeout teleport: an ownerless bot has no owner to follow back to
+                // reachable ground, and the owner-path's stuck/teleport recovery is skipped
+                // here. If it has a live target but hasn't landed a hit in a few seconds, it's
+                // stranded (isolated spawn platform / a gap the nav can't cross) — blink to a
+                // foothold next to the target so hunting works on any map layout.
+                Monster gt = entry.grindTarget;
+                if (gt != null && gt.isAlive() && gt.getMap() == bot.getMap()
+                        && nowMs - entry.lastAttackAtMs > 4000L) {
+                    Point mp = gt.getPosition();
+                    Point ground = BotPhysicsEngine.findGroundPoint(bot.getMap(), new Point(mp.x, mp.y - 1));
+                    BotPhysicsEngine.teleportTo(entry, bot, ground != null ? ground : mp);
+                    BotMovementManager.resetEntryStateAfterTeleport(entry);
+                    BotMovementManager.broadcastMovement(entry);
+                    entry.lastAttackAtMs = nowMs; // grace period before re-evaluating
+                }
             } else {
                 tickIdleEntry(entry, bot);
             }
@@ -2361,6 +2376,7 @@ public class BotManager {
                 int prevCooldown = entry.attackCooldownMs;
                 BotCombatManager.attackMonster(entry, bot, attackPlan);
                 boolean attacked = entry.attackCooldownMs != prevCooldown;
+                if (attacked) entry.lastAttackAtMs = System.currentTimeMillis();
                 // If a ranged bot just did a degenerate close-range hit, force retreat next tick
                 if (attacked && attackPlan.isCloseRangeRoute()
                         && BotCombatManager.isRangedAmmoWeapon(grindWeaponType)) {

@@ -5,7 +5,7 @@ public final class BotLlmConfig {
     public static volatile boolean typoSuggesterEnabled = false; // recommended off if LLM on, too many false positive and block LLM chat sometimes
 
     public static volatile String endpoint = "http://localhost:11434";
-    public static volatile String model = "gemma4:e2b";
+    public static volatile String model = "qwen2.5:7b";
     public static volatile int requestTimeoutMs = 30_000;
     public static volatile int maxConcurrentGlobal = 4;
     // Hard ceiling on the FULL reply (sum across split messages). Computed
@@ -81,6 +81,26 @@ public final class BotLlmConfig {
     // (which is sized for chat replies) so the rolling memory can actually carry detail.
     // ~300 tokens ≈ 4-8 short sentences ≈ what fits comfortably in 800 chars.
     public static volatile int summaryMaxPredictTokens = 300;
+
+    // ---- Autonomous planner (BotAutonomousPlanner) ----
+    // Master switch for the off-tick decision layer. When false the planner never
+    // fires and bots behave exactly as before (owner-command driven only). Independent
+    // of `enabled` (chat) so chat and autonomy can be toggled separately.
+    public static volatile boolean plannerEnabled = true;
+    // How often the planner re-evaluates each idle bot. 5-10s keeps decisions responsive
+    // without hammering the SLM. Critical events can force an immediate re-eval out of band.
+    public static volatile int plannerIntervalMs = 8_000;
+    // Token budget for one planner decision. A JSON object {"action","reason","params"}
+    // is small; ~96 tokens covers a one-line reason plus the structure comfortably.
+    public static volatile int plannerMaxTokens = 96;
+    // Directory holding per-bot personality/goal context files (SOUL.md, GOAL.md).
+    // Layout: <plannerDataDir>/<botName>/SOUL.md etc.
+    public static volatile String plannerDataDir = "bots/agent-data";
+    // Directory holding swappable global system-prompt templates for the planner.
+    // active.txt names the active template (basename); <name>.md is the template,
+    // <name>.fewshot.md an optional few-shot fragment. When no active template is
+    // set, the planner uses its built-in hardcoded system prompt. See PlannerPromptLibrary.
+    public static volatile String plannerPromptsDir = "bots/planner-prompts";
 
     private BotLlmConfig() {}
 }

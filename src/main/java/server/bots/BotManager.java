@@ -468,6 +468,10 @@ public class BotManager {
             normalizeSpawnedBot(entry);
         }
         after(randMs(30_000, 31_000), () -> BotChatManager.checkBotStatus(entry, bot));
+        // Register with the autonomous planner. The planner only acts when
+        // BotLlmConfig.plannerEnabled is true and the bot is idle (owner commands win),
+        // so registering unconditionally is safe and keeps the wiring in one place.
+        server.bots.planner.BotAutonomousPlanner.register(entry);
         return entry;
     }
 
@@ -540,6 +544,7 @@ public class BotManager {
         if (entry != null && entry.task != null) {
             entry.task.cancel(false);
         }
+        server.bots.planner.BotAutonomousPlanner.unregister(entry);
     }
 
     private static void clearBotOnlyAutopotState(Character bot) {
@@ -3032,6 +3037,33 @@ public class BotManager {
         clearMode(entry);
         entry.moveTarget = null;
         entry.moveTargetPrecise = false;
+    }
+
+    /**
+     * Public hook for the autonomous planner: re-evaluate resupply needs at the
+     * bot's current map and, if a shop is reachable and pots/ammo are low, start a
+     * shop visit. Delegates to the same battle-tested {@link BotShopManager#onMapChange}
+     * path the framework already runs on map transitions — no new shop logic.
+     */
+    public void issueBuyPotions(BotEntry entry) {
+        if (entry == null || entry.bot == null || entry.bot.getMap() == null) {
+            return;
+        }
+        BotShopManager.onMapChange(entry, entry.bot);
+    }
+
+    /**
+     * Public hook for the autonomous planner: send the bot to a safe town and idle.
+     * Reuses the existing owner-inactive safe-mode/town-warp path so behavior matches
+     * what already happens when an owner goes offline.
+     */
+    public void issueRestInTown(BotEntry entry) {
+        if (entry == null || entry.bot == null || entry.bot.getMap() == null || entry.owner == null) {
+            return;
+        }
+        clearScriptTasks(entry);
+        enterOwnerInactiveSafeMode(entry, entry.bot, entry.owner.getId(),
+                shouldTownWarpForOwnerInactive(entry));
     }
 
     /**

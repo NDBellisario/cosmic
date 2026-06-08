@@ -1,9 +1,13 @@
 package server.bots.llm;
 
 import client.Character;
+import client.inventory.InventoryType;
+import client.inventory.Item;
 import constants.game.ExpTable;
 import net.server.world.Party;
 import net.server.world.PartyCharacter;
+import server.ItemInformationProvider;
+import server.StatEffect;
 import server.bots.BotEntry;
 import server.life.Monster;
 import server.maps.MapleMap;
@@ -59,6 +63,90 @@ public final class SituationBuilder {
                     .append(" ago)\n");
         }
         return sb.toString();
+    }
+
+    /**
+     * Planner-facing snapshot. Like {@link #build} but adds an inventory line
+     * (HP/MP pots, meso) the decision layer needs, and drops the chat-only
+     * framing. Kept terse — target is well under ~500 tokens so the SLM context
+     * budget stays free for SOUL.md + GOAL.md. Every read is best-effort.
+     */
+    public static String buildForPlanner(BotEntry entry) {
+        if (entry == null || entry.getBot() == null) return "";
+        Character bot = entry.getBot();
+        MapleMap map = bot.getMap();
+        StringBuilder sb = new StringBuilder(320);
+        sb.append("[Current situation]\n");
+
+        if (map != null) {
+            String name = map.getMapName();
+            if (name != null && !name.isBlank()) {
+                sb.append("Map: ").append(name).append(" (id ").append(map.getId()).append(")\n");
+            } else {
+                sb.append("Map id: ").append(map.getId()).append('\n');
+            }
+        }
+
+        sb.append("Status: ").append(describeActivity(entry)).append('\n');
+
+        int lvl = bot.getLevel();
+        int pct = expPercent(bot, lvl);
+        sb.append("Level ").append(lvl);
+        if (pct >= 0) sb.append(", ").append(pct).append("% to next");
+        sb.append('\n');
+
+        try {
+            int curHp = bot.getHp();
+            int maxHp = bot.getCurrentMaxHp();
+            if (maxHp > 0) {
+                sb.append("HP: ").append((int) (100L * curHp / maxHp)).append("%\n");
+            }
+        } catch (Throwable ignored) {}
+
+        sb.append(describeInventory(bot)).append('\n');
+
+        String mobs = describeMobs(map);
+        if (!mobs.isEmpty()) sb.append("Mobs around: ").append(mobs).append('\n');
+
+        String party = describeParty(bot);
+        if (!party.isEmpty()) sb.append("Party: ").append(party).append('\n');
+
+        if (entry.lastOwnerCommand != null && !entry.lastOwnerCommand.isBlank()) {
+            sb.append("Last owner command: \"").append(entry.lastOwnerCommand).append('"')
+                    .append(" (").append(ago(System.currentTimeMillis() - entry.lastOwnerCommandAtMs))
+                    .append(" ago)\n");
+        }
+        return sb.toString();
+    }
+
+    /** "Pots: 240 HP, 80 MP | Meso: 1.2m" — recovery-potion counts plus meso balance. */
+    private static String describeInventory(Character bot) {
+        int hp = 0;
+        int mp = 0;
+        try {
+            ItemInformationProvider iip = ItemInformationProvider.getInstance();
+            for (Item item : bot.getInventory(InventoryType.USE).list()) {
+                if (item == null || item.getQuantity() <= 0) continue;
+                StatEffect fx = iip.getItemEffect(item.getItemId());
+                if (fx == null || !fx.getStatups().isEmpty()) continue;
+                boolean healsHp = fx.getHp() > 0 || fx.getHpRate() > 0;
+                boolean healsMp = fx.getMp() > 0 || fx.getMpRate() > 0;
+                if (healsHp) hp += item.getQuantity();
+                if (healsMp) mp += item.getQuantity();
+            }
+        } catch (Throwable ignored) {}
+        StringBuilder sb = new StringBuilder(48);
+        sb.append("Pots: ").append(hp).append(" HP, ").append(mp).append(" MP");
+        try {
+            sb.append(" | Meso: ").append(compactMeso(bot.getMeso()));
+        } catch (Throwable ignored) {}
+        return sb.toString();
+    }
+
+    private static String compactMeso(long meso) {
+        if (meso >= 1_000_000) return String.format("%.1fm", meso / 1_000_000.0);
+        if (meso >= 1_000) return String.format("%.0fk", meso / 1_000.0);
+        return Long.toString(meso);
     }
 
     private static String describeActivity(BotEntry entry) {

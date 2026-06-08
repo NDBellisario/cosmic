@@ -368,4 +368,23 @@ public class BotEntry {
     public Character getBot() { return bot; }
     public Character getOwner() { return owner; }
     public ReplyChannel getReplyChannel() { return replyChannel; }
+
+    /**
+     * True when the bot has no active mode the autonomous planner should not stomp:
+     * not grinding/following, no fixed move/farm/patrol target, and no shop visit or
+     * scripted task in flight. The planner only ever overrides this idle state; any
+     * active mode (including one the planner itself just set) is left alone until it
+     * clears. Read-only — exposes package-private mode state to {@code server.bots.planner}.
+     */
+    public boolean isIdleForPlanner() {
+        return !grinding
+                && !following
+                && moveTarget == null
+                && farmAnchor == null
+                && patrolRegionId < 0
+                && !shopVisitPending
+                && !shopSequenceActive
+                && activeScriptTask == null
+                && scriptTasks.isEmpty();
+    }
 }

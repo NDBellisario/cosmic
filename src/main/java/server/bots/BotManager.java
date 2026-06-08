@@ -2610,6 +2610,13 @@ public class BotManager {
      * short-circuit; map-change reset runs on the next tick).
      */
     private boolean handleOwnerOfflineOrDead(BotEntry entry, Character bot, Character owner, long nowMs, int ownerCharId) {
+        // Ownerless (panel-spawned) bots have no owner by design — the owner-inactive
+        // "retreat to town after 5 min" behavior is meant for owner-tethered companions
+        // whose owner went AFK. Skip it entirely so an ownerless hunting bot keeps
+        // hunting instead of being warped back to its return-map town.
+        if (entry.isOwnerless()) {
+            return false;
+        }
         boolean inactive = (owner == null) || (owner.getHp() <= 0);
 
         if (!inactive) {

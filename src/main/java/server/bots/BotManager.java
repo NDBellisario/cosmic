@@ -1877,14 +1877,23 @@ public class BotManager {
             if (groundAfterMapChange(entry, bot)) {
                 return;
             }
-            // Owner-offline pass-through: when entry.moveTarget is set (currently by
-            // the offline-town cluster, but any caller of issueMoveTo) the bot still
-            // walks toward it. Same field and movement core as the player "here"
-            // command — only the tick gate differs because the regular pipeline is
-            // tightly coupled to `owner` for combat/follow/heal logic that's all
-            // skipped here.
+            // Owner-offline pass-through. When entry.moveTarget is set (offline-town
+            // cluster, etc.) the bot walks toward it. When the planner has put the bot
+            // in grind mode, it HUNTS: run the same owner-independent survival systems
+            // and the same battle-tested tickGrindCombat the owner-driven path uses, so
+            // an ownerless bot finds, paths to, attacks, and kills mobs (and gains exp).
             if (entry.moveTarget != null) {
                 tickStandaloneMoveTarget(entry, bot, runAiTick);
+            } else if (entry.grinding && bot.getHp() > 0) {
+                BotMovementManager.refreshMovementProfile(entry);
+                if (tickOwnerlessCommon(entry, bot, runAiTick)) {
+                    return; // dead or action-locked this tick
+                }
+                Point botPos = bot.getPosition();
+                GrindResult gr = tickGrindCombat(entry, bot, botPos, botPos, runAiTick);
+                if (!gr.consumed()) {
+                    stepMovementCore(entry, gr.moveTarget(), runAiTick);
+                }
             } else {
                 tickIdleEntry(entry, bot);
             }
@@ -2402,6 +2411,38 @@ public class BotManager {
             if (lootPos != null) targetPos = lootPos;
         }
         return new GrindResult(false, targetPos);
+    }
+
+    /**
+     * Owner-independent "common systems" for an ownerless grinding bot: take mob damage,
+     * handle death, release stale mob control, passive loot, auto-pot, passive recovery,
+     * level-up, cooldown decrement, and (on AI ticks) skill cache / support heal / buffs.
+     * Mirrors {@link #runCommonTickSystems} minus the owner-coupled bits (AFK check, PQ,
+     * trade). Returns true if the tick should stop here (bot dead, or action-locked).
+     */
+    private boolean tickOwnerlessCommon(BotEntry entry, Character bot, boolean runAiTick) {
+        BotCombatManager.tickMobDamage(entry, bot);
+        if (bot.getHp() <= 0) {
+            if (entry.deadUntil == 0) {
+                BotCombatManager.enterDeadState(entry, bot, false);
+            }
+            return true;
+        }
+        tickReleaseMonsterControl(bot);
+        if (bot.getTrade() == null) {
+            BotInventoryManager.tickPassiveLoot(entry, bot);
+        }
+        BotPotionManager.tickPotionCheck(entry, bot);
+        BotPotionManager.tickPassiveRecovery(entry, bot);
+        BotBuildManager.checkLevelUp(entry, bot);
+        BotCombatManager.tickActionLock(entry);
+        if (runAiTick) {
+            BotCombatManager.rebuildSkillCacheIfNeeded(entry, bot);
+            BotCombatManager.tickSupportHealing(entry, bot);
+            BotCombatManager.tickBuffs(entry, bot);
+            BotBuffManager.tick(entry, bot);
+        }
+        return tickActionLocked(entry);
     }
 
     private void tickAnchoredFarm(BotEntry entry, Character bot, Point botPos, boolean runAiTick) {
@@ -4055,10 +4096,15 @@ public class BotManager {
                     future.complete(OwnerlessSpawnResult.fail("Channel 1 is not available."));
                     return;
                 }
-                int targetMapId = (mapId != null) ? mapId : 100000000; // Henesys as safe default
-                server.maps.MapleMap targetMap = ch.getMapFactory().getMap(targetMapId);
-                if (targetMap == null) {
-                    future.complete(OwnerlessSpawnResult.fail("Map " + targetMapId + " not found."));
+                // null targetMap -> loadOfflineBot uses the bot's SAVED map. This keeps
+                // this.map and the map's player list consistent: newClient resets this.map
+                // to the saved map, so registering the bot in a *different* requested map's
+                // player list would leave it absent from its actual map — and then mob-kill
+                // exp distribution (which uses mob.map.getMapAllPlayers()) credits no one.
+                // Honoring an explicit, different mapId needs a deeper loadOfflineBot fix.
+                server.maps.MapleMap targetMap = (mapId != null) ? ch.getMapFactory().getMap(mapId) : null;
+                if (mapId != null && targetMap == null) {
+                    future.complete(OwnerlessSpawnResult.fail("Map " + mapId + " not found."));
                     return;
                 }
                 Character botChar = loadOfflineBot(charId, world, channel, targetMap, null);
@@ -4072,8 +4118,10 @@ public class BotManager {
                         ? portal.getPosition() : new Point(0, 0);
                 botChar.setPosition(resolveSpawnPosition(actualMap, base));
                 // Use the bot's own charId as the sentinel ownerCharId; owner == null.
-                // Use the bot's own charId as the sentinel ownerCharId; owner == null.
-                registerBotInternal(botChar.getId(), null, botChar, true);
+                // Sentinel ownerCharId 0 (no character has id 0) so resolveTickOwner
+                // returns null -> the owner==null hunting branch runs. Using the bot's
+                // own id would make it resolve as its own owner and take the owner path.
+                registerBotInternal(0, null, botChar, true);
 
                 String mn = actualMap.getMapName() != null ? actualMap.getMapName() : "";
                 future.complete(OwnerlessSpawnResult.ok(botChar.getId(), botChar.getName(), actualMap.getId(), mn));

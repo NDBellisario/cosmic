@@ -4159,14 +4159,21 @@ public class BotManager {
                     future.complete(OwnerlessSpawnResult.fail("Map " + targetMapId + " not found."));
                     return;
                 }
-                Point spawnPos = resolveSpawnPosition(targetMap, new Point(0, 0));
-
-                Character botChar = loadOfflineBot(charId, world, channel, targetMap, spawnPos);
+                Character botChar = loadOfflineBot(charId, world, channel, targetMap, null);
+                // Place on a valid foothold: the bot's ACTUAL spawn map's default
+                // portal. Without this it lands at x=0 (off every foothold) and
+                // free-falls into the void. Use the actual map so the response and
+                // physics agree even if the saved map differs from the requested one.
+                server.maps.MapleMap actualMap = botChar.getMap() != null ? botChar.getMap() : targetMap;
+                server.maps.Portal portal = actualMap.getPortal(0);
+                Point base = (portal != null && portal.getPosition() != null)
+                        ? portal.getPosition() : new Point(0, 0);
+                botChar.setPosition(resolveSpawnPosition(actualMap, base));
                 // Use the bot's own charId as the sentinel ownerCharId; owner == null.
                 registerBotInternal(botChar.getId(), null, botChar, true);
 
-                String mn = targetMap.getMapName() != null ? targetMap.getMapName() : "";
-                future.complete(OwnerlessSpawnResult.ok(botChar.getId(), botChar.getName(), targetMap.getId(), mn));
+                String mn = actualMap.getMapName() != null ? actualMap.getMapName() : "";
+                future.complete(OwnerlessSpawnResult.ok(botChar.getId(), botChar.getName(), actualMap.getId(), mn));
             } catch (Exception ex) {
                 log.warn("control-api: spawn '{}' failed: {}", charName, ex.toString());
                 future.complete(OwnerlessSpawnResult.fail("Spawn failed: " + ex.getMessage()));

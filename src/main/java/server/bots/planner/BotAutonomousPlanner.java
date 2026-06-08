@@ -8,6 +8,9 @@ import server.bots.BotManager;
 import server.bots.llm.BotLlmConfig;
 import server.bots.llm.OllamaClient;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -50,6 +53,40 @@ public final class BotAutonomousPlanner {
     /** Per-bot in-flight gate so we never queue more than one decision per bot. */
     private static final ConcurrentHashMap<Integer, AtomicBoolean> INFLIGHT = new ConcurrentHashMap<>();
 
+    // ---- Decision ring buffer -----------------------------------------------
+    /** One recorded planner decision. Immutable so it's safe to hand to HTTP thread. */
+    public record DecisionRecord(long epochMs, String action, String reason) {}
+
+    /** Max decisions retained per bot. */
+    private static final int RING_CAPACITY = 20;
+    /** botCharId → ring buffer (newest at tail). Written from planner executor, read from HTTP thread. */
+    private static final ConcurrentHashMap<Integer, List<DecisionRecord>> DECISIONS = new ConcurrentHashMap<>();
+
+    /**
+     * Returns up to {@code limit} most-recent decisions for {@code botId} in oldest-first order
+     * (i.e. newest last, matching the API contract). Safe to call from any thread.
+     */
+    public static List<DecisionRecord> recentDecisions(int botId, int limit) {
+        List<DecisionRecord> ring = DECISIONS.get(botId);
+        if (ring == null) return Collections.emptyList();
+        synchronized (ring) {
+            int size = ring.size();
+            int from = Math.max(0, size - Math.max(1, limit));
+            return new ArrayList<>(ring.subList(from, size));
+        }
+    }
+
+    private static void recordDecision(int botId, String action, String reason) {
+        List<DecisionRecord> ring = DECISIONS.computeIfAbsent(botId, k -> new ArrayList<>(RING_CAPACITY + 1));
+        synchronized (ring) {
+            ring.add(new DecisionRecord(System.currentTimeMillis(), action, reason != null ? reason : ""));
+            while (ring.size() > RING_CAPACITY) {
+                ring.remove(0);
+            }
+        }
+    }
+    // -------------------------------------------------------------------------
+
     /** Single recurring sweep that evaluates all idle registered bots. Started lazily. */
     private static volatile boolean started = false;
 
@@ -68,6 +105,7 @@ public final class BotAutonomousPlanner {
         int id = entry.getBot().getId();
         REGISTERED.remove(id);
         INFLIGHT.remove(id);
+        DECISIONS.remove(id);
     }
 
     /**
@@ -180,6 +218,7 @@ public final class BotAutonomousPlanner {
 
         log.info("planner[{}] decision={} reason=\"{}\" ({}ms)",
                 botName, decision.action, decision.reason, elapsed);
+        recordDecision(bot.getId(), decision.action.name(), decision.reason);
         apply(entry, decision);
     }
 

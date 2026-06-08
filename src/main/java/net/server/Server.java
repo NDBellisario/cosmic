@@ -952,6 +952,8 @@ public class Server {
         for (Channel ch : this.getAllChannels()) {
             ch.reloadEventScriptManager();
         }
+
+        server.bots.control.BotControlApi.start();
     }
 
     private ChannelDependencies registerChannelDependencies() {

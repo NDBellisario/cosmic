@@ -36,10 +36,13 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -4043,6 +4046,187 @@ public class BotManager {
         }
 
         entry.aiTickAccumulatorMs -= cfg.AI_TICK_MS;
+        return true;
+    }
+
+    // =========================================================================
+    // Bot Control API support (called from server.bots.control.BotControlApi)
+    // =========================================================================
+
+    /** Snapshot of one bot's live state, safe to read from the HTTP thread. */
+    public record BotStateDto(
+            int id, String name,
+            int mapId, String mapName,
+            int x, int y,
+            int hp, int maxHp,
+            int level,
+            String status,
+            boolean idle) {}
+
+    /** Build the live state list for every registered bot. Reads volatile fields; no lock needed. */
+    public List<BotStateDto> listBotStates() {
+        List<BotStateDto> out = new ArrayList<>();
+        for (List<BotEntry> entries : bots.values()) {
+            for (BotEntry e : entries) {
+                Character bot = e.bot;
+                if (bot == null) continue;
+                try {
+                    server.maps.MapleMap m = bot.getMap();
+                    String mapName = m != null ? m.getMapName() : "";
+                    if (mapName == null) mapName = "";
+                    int mapId = bot.getMapId();
+                    java.awt.Point pos = bot.getPosition();
+                    int x = pos != null ? pos.x : 0;
+                    int y = pos != null ? pos.y : 0;
+                    int hp = bot.getHp();
+                    int maxHp = bot.getCurrentMaxHp();
+                    int level = bot.getLevel();
+                    String status = describeStatus(e);
+                    boolean idle = e.isIdleForPlanner();
+                    out.add(new BotStateDto(bot.getId(), bot.getName(), mapId, mapName, x, y, hp, maxHp, level, status, idle));
+                } catch (Throwable t) {
+                    log.warn("control-api: error reading bot state for {}: {}", bot.getName(), t.toString());
+                }
+            }
+        }
+        return out;
+    }
+
+    private static String describeStatus(BotEntry e) {
+        if (e.isGrinding()) return "grinding";
+        if (e.isFollowing()) return "following owner";
+        if (e.owner == null) return "idle";
+        return "owner offline";
+    }
+
+    /**
+     * Result of an ownerless-spawn attempt. Carries what the HTTP handler needs to build JSON.
+     */
+    public record OwnerlessSpawnResult(boolean success, int botCharId, String botName, int mapId, String mapName, String errorMessage) {
+        static OwnerlessSpawnResult ok(int botCharId, String botName, int mapId, String mapName) {
+            return new OwnerlessSpawnResult(true, botCharId, botName, mapId, mapName, null);
+        }
+        static OwnerlessSpawnResult fail(String msg) {
+            return new OwnerlessSpawnResult(false, 0, null, 0, null, msg);
+        }
+    }
+
+    /**
+     * Spawn an ownerless bot by character name onto the given map (or Henesys if mapId is null).
+     * Schedules the spawn onto the game thread and blocks the HTTP thread up to 5 seconds.
+     */
+    public OwnerlessSpawnResult spawnOfflineBotByName(String name, Integer mapId) {
+        if (name == null || name.isBlank()) {
+            return OwnerlessSpawnResult.fail("Name must not be blank.");
+        }
+
+        BotOwnershipService.ResolvedCharacter resolved =
+                BotOwnershipService.getInstance().resolveCharacterByName(name);
+        if (resolved == null) {
+            return OwnerlessSpawnResult.fail("No character named '" + name + "' exists.");
+        }
+        if (resolved.isOnline() && !resolved.isOnlineAsBot()) {
+            return OwnerlessSpawnResult.fail("'" + name + "' is currently logged in as a real player.");
+        }
+        // If already running as an ownerless bot, just report success.
+        if (resolved.isOnline()) {
+            Character existing = resolved.onlineCharacter();
+            Character activeOwner = getActiveOwnerByBotCharId(existing.getId());
+            if (activeOwner == null) {
+                server.maps.MapleMap m = existing.getMap();
+                String mn = m != null ? (m.getMapName() != null ? m.getMapName() : "") : "";
+                return OwnerlessSpawnResult.ok(existing.getId(), existing.getName(), existing.getMapId(), mn);
+            }
+            return OwnerlessSpawnResult.fail("Bot '" + name + "' is already controlled by " + activeOwner.getName() + ".");
+        }
+
+        final int charId = resolved.id();
+        final String charName = resolved.name();
+
+        CompletableFuture<OwnerlessSpawnResult> future = new CompletableFuture<>();
+        TimerManager.getInstance().schedule(() -> {
+            try {
+                int world = 0;
+                int channel = 1;
+                net.server.channel.Channel ch = Server.getInstance().getChannel(world, channel);
+                if (ch == null) {
+                    future.complete(OwnerlessSpawnResult.fail("Channel 1 is not available."));
+                    return;
+                }
+                int targetMapId = (mapId != null) ? mapId : 100000000; // Henesys as safe default
+                server.maps.MapleMap targetMap = ch.getMapFactory().getMap(targetMapId);
+                if (targetMap == null) {
+                    future.complete(OwnerlessSpawnResult.fail("Map " + targetMapId + " not found."));
+                    return;
+                }
+                Point spawnPos = resolveSpawnPosition(targetMap, new Point(0, 0));
+
+                Character botChar = loadOfflineBot(charId, world, channel, targetMap, spawnPos);
+                // Use the bot's own charId as the sentinel ownerCharId; owner == null.
+                registerBotInternal(botChar.getId(), null, botChar, true);
+
+                String mn = targetMap.getMapName() != null ? targetMap.getMapName() : "";
+                future.complete(OwnerlessSpawnResult.ok(botChar.getId(), botChar.getName(), targetMap.getId(), mn));
+            } catch (Exception ex) {
+                log.warn("control-api: spawn '{}' failed: {}", charName, ex.toString());
+                future.complete(OwnerlessSpawnResult.fail("Spawn failed: " + ex.getMessage()));
+            }
+        }, 0L);
+
+        try {
+            return future.get(5, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            return OwnerlessSpawnResult.fail("Spawn timed out.");
+        } catch (Exception e) {
+            return OwnerlessSpawnResult.fail("Spawn error: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Despawn a bot by its character id. Cancels its tick, removes it from the registry,
+     * then removes it from its map/channel/world on the game thread.
+     *
+     * @return true if found and removed, false if not registered.
+     */
+    public boolean despawnBot(int botCharId) {
+        // Find the Character reference while on HTTP thread (ConcurrentHashMap reads are safe).
+        Character botChar = null;
+        outer:
+        for (List<BotEntry> entries : bots.values()) {
+            for (BotEntry e : entries) {
+                if (e.bot.getId() == botCharId) {
+                    botChar = e.bot;
+                    break outer;
+                }
+            }
+        }
+        if (botChar == null) return false;
+
+        // Cancel tick + unregister planner.
+        boolean removed = removeBotByCharId(botCharId);
+        if (!removed) return false;
+
+        final Character finalBot = botChar;
+        CompletableFuture<Void> cleanup = new CompletableFuture<>();
+        TimerManager.getInstance().schedule(() -> {
+            try {
+                server.maps.MapleMap map = finalBot.getMap();
+                if (map != null) {
+                    map.removePlayer(finalBot);
+                }
+                try {
+                    Server.getInstance().getWorld(finalBot.getWorld()).removePlayer(finalBot);
+                } catch (Throwable ignored) {}
+            } catch (Throwable t) {
+                log.warn("control-api: despawn cleanup for charId={} failed: {}", botCharId, t.toString());
+            } finally {
+                cleanup.complete(null);
+            }
+        }, 0L);
+
+        try {
+            cleanup.get(3, TimeUnit.SECONDS);
+        } catch (Exception ignored) {}
         return true;
     }
 

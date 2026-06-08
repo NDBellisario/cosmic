@@ -102,5 +102,14 @@ public final class BotLlmConfig {
     // set, the planner uses its built-in hardcoded system prompt. See PlannerPromptLibrary.
     public static volatile String plannerPromptsDir = "bots/planner-prompts";
 
+    // ---- Bot Control HTTP API ----
+    // Lightweight HTTP API on 127.0.0.1 only for the external debug panel to spawn/despawn
+    // ownerless bots and read planner decisions without a human logged in.
+    public static volatile boolean botControlApiEnabled = true;
+    public static volatile int botControlApiPort = 8485;
+    // Optional shared secret. If non-empty, callers must send X-Panel-Token: <token>.
+    // If empty, the API is open to localhost.
+    public static volatile String botControlApiToken = "";
+
     private BotLlmConfig() {}
 }

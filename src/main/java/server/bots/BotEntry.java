@@ -367,6 +367,8 @@ public class BotEntry {
     // Mutations stay package-private to preserve existing invariants.
     public Character getBot() { return bot; }
     public Character getOwner() { return owner; }
+    /** True for panel-spawned bots with no owner (registered with sentinel ownerCharId). */
+    public boolean isOwnerless() { return owner == null; }
     public ReplyChannel getReplyChannel() { return replyChannel; }
 
     /**

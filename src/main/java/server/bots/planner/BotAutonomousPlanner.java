@@ -126,8 +126,10 @@ public final class BotAutonomousPlanner {
             if (started) return;
             long period = Math.max(1000L, BotLlmConfig.plannerIntervalMs);
             EXEC.scheduleWithFixedDelay(BotAutonomousPlanner::sweep, period, period, TimeUnit.MILLISECONDS);
+            long hb = Math.max(10_000L, BotLlmConfig.plannerHeartbeatMs);
+            EXEC.scheduleWithFixedDelay(BotAutonomousPlanner::heartbeat, hb, hb, TimeUnit.MILLISECONDS);
             started = true;
-            log.info("planner: sweep loop started (interval {}ms)", period);
+            log.info("planner: sweep loop started (interval {}ms, heartbeat {}ms)", period, hb);
         }
     }
 
@@ -144,17 +146,42 @@ public final class BotAutonomousPlanner {
     }
 
     /**
+     * Heartbeat: every plannerHeartbeatMs, force a fresh decision for each OWNERLESS
+     * bot even if it is mid-action (hunting). Keeps the autonomous loop and the SLM
+     * alive and lets the bot periodically reassess its plan. Owner-driven bots are
+     * left to the idle-gated sweep so owner commands are never overridden.
+     */
+    private static void heartbeat() {
+        if (!BotLlmConfig.plannerEnabled) return;
+        for (BotEntry entry : REGISTERED.values()) {
+            try {
+                if (entry.isOwnerless()) {
+                    submit(entry, "heartbeat", true);
+                }
+            } catch (Throwable t) {
+                log.warn("planner: heartbeat submit failed: {}", t.toString());
+            }
+        }
+    }
+
+    /**
      * Gate + dispatch one decision onto the planner executor. Skips bots that are
      * not idle (owner commands and any active mode win), already have a decision in
      * flight, or when the global concurrency cap is saturated.
      */
     private static void submit(BotEntry entry, String eventReason) {
+        submit(entry, eventReason, false);
+    }
+
+    private static void submit(BotEntry entry, String eventReason, boolean force) {
         if (!BotLlmConfig.plannerEnabled) return;
         Character bot = entry.getBot();
         if (bot == null || bot.getMap() == null) return;
 
         // Owner commands and any active mode take priority — planner only fills idle.
-        if (!entry.isIdleForPlanner()) return;
+        // A forced heartbeat re-evaluation (ownerless bots) bypasses this so the bot
+        // periodically reassesses even mid-hunt.
+        if (!force && !entry.isIdleForPlanner()) return;
 
         int id = bot.getId();
         AtomicBoolean inflight = INFLIGHT.computeIfAbsent(id, k -> new AtomicBoolean(false));
@@ -167,7 +194,7 @@ public final class BotAutonomousPlanner {
 
         EXEC.submit(() -> {
             try {
-                decide(entry, eventReason);
+                decide(entry, eventReason, force);
             } catch (Throwable t) {
                 log.warn("planner: decide failed for {}: {}", bot.getName(), t.toString());
             } finally {
@@ -177,8 +204,12 @@ public final class BotAutonomousPlanner {
         });
     }
 
-    /** Build prompt → call SLM → parse → dispatch. Off-tick. */
     private static void decide(BotEntry entry, String eventReason) {
+        decide(entry, eventReason, false);
+    }
+
+    /** Build prompt → call SLM → parse → dispatch. Off-tick. */
+    private static void decide(BotEntry entry, String eventReason, boolean force) {
         Character bot = entry.getBot();
         String botName = bot.getName();
 
@@ -208,7 +239,8 @@ public final class BotAutonomousPlanner {
         }
 
         // Re-check idle: the owner may have issued a command while the SLM was thinking.
-        if (!entry.isIdleForPlanner()) {
+        // A forced heartbeat re-evaluation applies regardless (it has no owner to defer to).
+        if (!force && !entry.isIdleForPlanner()) {
             if (BotLlmConfig.debugLog) {
                 log.info("planner[{}] decided {} but bot no longer idle — owner command wins",
                         botName, decision.action);

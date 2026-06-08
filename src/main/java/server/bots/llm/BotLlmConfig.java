@@ -90,6 +90,10 @@ public final class BotLlmConfig {
     // How often the planner re-evaluates each idle bot. 5-10s keeps decisions responsive
     // without hammering the SLM. Critical events can force an immediate re-eval out of band.
     public static volatile int plannerIntervalMs = 8_000;
+    // Heartbeat: how often to FORCE a fresh planner decision for each ownerless bot,
+    // even mid-action (hunting), so it periodically reassesses and the SLM stays warm.
+    // Owner-driven bots are unaffected (idle-gated sweep only). Min clamp 10s.
+    public static volatile int plannerHeartbeatMs = 60_000;
     // Token budget for one planner decision. A JSON object {"action","reason","params"}
     // is small; ~96 tokens covers a one-line reason plus the structure comfortably.
     public static volatile int plannerMaxTokens = 96;

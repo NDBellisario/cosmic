@@ -62,6 +62,44 @@ public final class BotAutonomousPlanner {
     /** botCharId → ring buffer (newest at tail). Written from planner executor, read from HTTP thread. */
     private static final ConcurrentHashMap<Integer, List<DecisionRecord>> DECISIONS = new ConcurrentHashMap<>();
 
+    // ---- Brain snapshot (last full cycle per bot) ---------------------------
+    /**
+     * Full snapshot of the most-recent planner decision cycle for one bot.
+     * Immutable record; safe to hand to the HTTP thread without synchronization.
+     *
+     * @param epochMs        when this cycle ran (ms since epoch)
+     * @param situation      the SituationBuilder text included in the user prompt
+     * @param input          the full user-prompt string fed to the SLM
+     * @param system         the system-prompt string fed to the SLM
+     * @param rawOutput      the verbatim SLM response
+     * @param action         parsed action name, e.g. "GRIND"
+     * @param reason         parsed reason string
+     * @param params         parsed params as "key=value,..." (empty string if none)
+     * @param nextRunEpochMs estimated epoch ms when the next cycle will fire
+     */
+    public record BrainSnapshot(
+            long epochMs,
+            String situation,
+            String input,
+            String system,
+            String rawOutput,
+            String action,
+            String reason,
+            String params,
+            long nextRunEpochMs
+    ) {}
+
+    /** botCharId → most-recent full cycle snapshot. Planner thread writes; HTTP thread reads. */
+    private static final ConcurrentHashMap<Integer, BrainSnapshot> BRAIN_SNAPSHOTS = new ConcurrentHashMap<>();
+
+    /**
+     * Returns the most-recent {@link BrainSnapshot} for {@code botId}, or {@code null} if
+     * no cycle has completed yet. Safe to call from any thread.
+     */
+    public static BrainSnapshot brainSnapshot(int botId) {
+        return BRAIN_SNAPSHOTS.get(botId);
+    }
+
     /**
      * Returns up to {@code limit} most-recent decisions for {@code botId} in oldest-first order
      * (i.e. newest last, matching the API contract). Safe to call from any thread.
@@ -106,6 +144,7 @@ public final class BotAutonomousPlanner {
         REGISTERED.remove(id);
         INFLIGHT.remove(id);
         DECISIONS.remove(id);
+        BRAIN_SNAPSHOTS.remove(id);
     }
 
     /**
@@ -216,6 +255,9 @@ public final class BotAutonomousPlanner {
         String soul = ContextFileLoader.loadSoul(botName);
         String goal = ContextFileLoader.loadGoal(botName);
         String system = PlannerPromptBuilder.buildSystem(entry, soul);
+        // Capture the situation text separately (it's embedded inside prompt, but surface it
+        // explicitly so the brain view can show it without re-parsing the full prompt).
+        String situation = server.bots.llm.SituationBuilder.buildForPlanner(entry);
         String prompt = PlannerPromptBuilder.buildPrompt(entry, goal, eventReason);
 
         long t0 = System.currentTimeMillis();
@@ -251,6 +293,26 @@ public final class BotAutonomousPlanner {
         log.info("planner[{}] decision={} reason=\"{}\" ({}ms)",
                 botName, decision.action, decision.reason, elapsed);
         recordDecision(bot.getId(), decision.action.name(), decision.reason);
+
+        // Capture the full brain snapshot for the debug panel. nextRunEpochMs is the
+        // estimated time of the next cycle: heartbeat period for ownerless bots, sweep
+        // period otherwise (same intervals used in ensureStarted).
+        long nextInterval = entry.isOwnerless()
+                ? Math.max(10_000L, BotLlmConfig.plannerHeartbeatMs)
+                : Math.max(1000L, BotLlmConfig.plannerIntervalMs);
+        String paramsStr = buildParamsString(decision);
+        BRAIN_SNAPSHOTS.put(bot.getId(), new BrainSnapshot(
+                System.currentTimeMillis(),
+                situation != null ? situation : "",
+                prompt,
+                system != null ? system : "",
+                raw.get(),
+                decision.action.name(),
+                decision.reason != null ? decision.reason : "",
+                paramsStr,
+                System.currentTimeMillis() + nextInterval
+        ));
+
         apply(entry, decision);
 
         // The SLM only *reports* which checklist items are done; we do the safe edit
@@ -261,6 +323,17 @@ public final class BotAutonomousPlanner {
                 log.info("planner[{}] checked off {} goal checklist item(s)", botName, checked);
             }
         }
+    }
+
+    /** Flatten a decision's params map to "key=val, ..." for the brain snapshot. */
+    private static String buildParamsString(PlannerDecision d) {
+        if (d.params == null || d.params.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (java.util.Map.Entry<String, String> e : d.params.entrySet()) {
+            if (sb.length() > 0) sb.append(", ");
+            sb.append(e.getKey()).append('=').append(e.getValue());
+        }
+        return sb.toString();
     }
 
     /** Map a parsed decision onto the existing BotManager hooks. */

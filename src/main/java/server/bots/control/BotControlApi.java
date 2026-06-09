@@ -110,6 +110,9 @@ public final class BotControlApi {
         } else if ("GET".equals(method) && path.matches("/bots/\\d+/decisions")) {
             int id = extractIdFromPath(path, 1);
             handleDecisions(ex, id);
+        } else if ("GET".equals(method) && path.matches("/bots/\\d+/brain")) {
+            int id = extractIdFromPath(path, 1);
+            handleBrain(ex, id);
         } else if ("POST".equals(method) && path.matches("/bots/\\d+/despawn")) {
             int id = extractIdFromPath(path, 1);
             handleDespawn(ex, id);
@@ -243,6 +246,41 @@ public final class BotControlApi {
             sb.append("}");
         }
         sb.append(']');
+        send(ex, 200, sb.toString());
+    }
+
+    /**
+     * GET /bots/{id}/brain → the most-recent full planner cycle snapshot, or {} if none yet.
+     * JSON shape:
+     * {
+     *   "epochMs": <long>,
+     *   "situation": "<string>",
+     *   "input": "<string>",
+     *   "system": "<string>",
+     *   "rawOutput": "<string>",
+     *   "action": "<string>",
+     *   "reason": "<string>",
+     *   "params": "<string>",
+     *   "nextRunEpochMs": <long>
+     * }
+     */
+    private static void handleBrain(HttpExchange ex, int botCharId) throws IOException {
+        BotAutonomousPlanner.BrainSnapshot snap = BotAutonomousPlanner.brainSnapshot(botCharId);
+        if (snap == null) {
+            send(ex, 200, "{}");
+            return;
+        }
+        StringBuilder sb = new StringBuilder(512);
+        sb.append("{\"epochMs\":").append(snap.epochMs());
+        sb.append(",\"situation\":\"").append(jsonEscape(snap.situation())).append("\"");
+        sb.append(",\"input\":\"").append(jsonEscape(snap.input())).append("\"");
+        sb.append(",\"system\":\"").append(jsonEscape(snap.system())).append("\"");
+        sb.append(",\"rawOutput\":\"").append(jsonEscape(snap.rawOutput())).append("\"");
+        sb.append(",\"action\":\"").append(jsonEscape(snap.action())).append("\"");
+        sb.append(",\"reason\":\"").append(jsonEscape(snap.reason())).append("\"");
+        sb.append(",\"params\":\"").append(jsonEscape(snap.params())).append("\"");
+        sb.append(",\"nextRunEpochMs\":").append(snap.nextRunEpochMs());
+        sb.append("}");
         send(ex, 200, sb.toString());
     }
 

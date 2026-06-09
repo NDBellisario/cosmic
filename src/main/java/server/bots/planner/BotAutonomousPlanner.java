@@ -292,6 +292,7 @@ public final class BotAutonomousPlanner {
             case FOLLOW_OWNER -> bm.issueFollowOwner(entry);
             case STOP -> bm.issueStop(entry);
             case BUY_POTIONS -> bm.issueBuyPotions(entry);
+            case SELL -> bm.issueSellJunk(entry);
             case TURN_IN_QUEST -> {
                 // Quest turn-in automation is a later phase; log the intent so M1 stays honest.
                 log.info("planner[{}] TURN_IN_QUEST npc {} requested but quest automation unavailable; idling",

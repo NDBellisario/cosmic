@@ -21,6 +21,7 @@ public enum PlannerAction {
     FOLLOW_OWNER,
     STOP,
     BUY_POTIONS,
+    SELL,
     TURN_IN_QUEST,
     REST_IN_TOWN,
     IDLE;

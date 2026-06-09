@@ -3030,6 +3030,95 @@ public class BotManager {
     }
 
     /**
+     * Public hook for the autonomous planner: vendor junk (ETC drops + junk equips).
+     * Owner-driven bots reuse the existing chat-command sell-trash visit. Ownerless
+     * bots have no shop on their hunting map and a grind-only tick path, so they do a
+     * teleport round-trip: jump to a town with a vendor, batch-sell, jump back, resume
+     * grinding. The whole trip runs as one game-thread task (map/inventory mutation
+     * must not happen off-thread) and the bot blinks to town and back within a tick.
+     */
+    public void issueSellJunk(BotEntry entry) {
+        if (entry == null || entry.bot == null || entry.bot.getMap() == null) {
+            return;
+        }
+        if (!entry.isOwnerless()) {
+            BotShopManager.requestSellTrashVisit(entry, entry.bot);
+            return;
+        }
+        final Character bot = entry.bot;
+        final int world = bot.getWorld();
+        final int channel = bot.getClient().getChannel();
+        TimerManager.getInstance().schedule(() -> {
+            try {
+                sellJunkRoundTrip(entry, bot, world, channel);
+            } catch (Exception ex) {
+                log.warn("sell-junk[{}] failed: {}", bot.getName(), ex.toString());
+            }
+        }, 0L);
+    }
+
+    private void sellJunkRoundTrip(BotEntry entry, Character bot, int world, int channel) {
+        MapleMap huntMap = bot.getMap();
+        if (huntMap == null) {
+            return;
+        }
+        final int returnMapId = huntMap.getId();
+
+        MapleMap town = resolveSellTownMap(huntMap);
+        if (town == null) {
+            log.info("sell-junk[{}] no town vendor reachable from map {}; skipping",
+                    bot.getName(), returnMapId);
+            return;
+        }
+
+        boolean changedMap = town.getId() != returnMapId;
+        if (changedMap) {
+            teleportBotToMap(entry, bot, town);
+        }
+
+        server.life.NPC npc = BotShopManager.findShopNpcOnMap(bot.getMap());
+        if (npc == null) {
+            log.info("sell-junk[{}] vendor vanished on map {}; aborting", bot.getName(), bot.getMapId());
+        } else {
+            BotPhysicsEngine.teleportTo(entry, bot, npc.getPosition());
+            int sold = BotShopManager.sellJunkAtShop(entry, bot, npc);
+            log.info("sell-junk[{}] sold {} junk stack(s) at {} (map {})",
+                    bot.getName(), sold, town.getMapName(), town.getId());
+        }
+
+        if (changedMap) {
+            MapleMap back = Server.getInstance().getChannel(world, channel).getMapFactory().getMap(returnMapId);
+            if (back != null) {
+                teleportBotToMap(entry, bot, back);
+            }
+        }
+        entry.grindTarget = null;
+        issueGrind(entry);
+    }
+
+    /** Walk the return-map chain (mob/field maps point toward town) for a vendor. */
+    private MapleMap resolveSellTownMap(MapleMap start) {
+        MapleMap m = start;
+        java.util.Set<Integer> seen = new java.util.HashSet<>();
+        while (m != null && seen.add(m.getId()) && seen.size() <= 6) {
+            if (BotShopManager.findShopNpcOnMap(m) != null) {
+                return m;
+            }
+            m = m.getReturnMap();
+        }
+        return null;
+    }
+
+    /** Live map change for a spawned bot: forceChangeMap + re-place at spawn. */
+    private void teleportBotToMap(BotEntry entry, Character bot, MapleMap map) {
+        server.maps.Portal sp = map.getPortal(0);
+        Point pos = resolveSpawnPosition(map,
+                (sp != null && sp.getPosition() != null) ? sp.getPosition() : new Point(0, 0));
+        bot.forceChangeMap(map, sp != null ? sp : map.findClosestPortal(pos));
+        placeSpawnedOnlineBot(entry, bot, map, pos);
+    }
+
+    /**
      * Public hook for map scripts: drop up to {@code quantity} from the first
      * stack of {@code itemId}. Use {@code quantity <= 0} to drop the whole stack.
      */

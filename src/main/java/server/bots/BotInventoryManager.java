@@ -1577,6 +1577,21 @@ class BotInventoryManager {
         return collectEquipsGroup(EquipsGroup.NORMAL, entry, bot);
     }
 
+    /**
+     * ETC-bag junk worth vendoring: mob drops with a sell price that aren't quest
+     * items or otherwise drop-restricted. {@link #collectFromBag} already filters
+     * out quest items via {@link #isSafeToDrop}; {@code isDropRestricted} re-checks
+     * quest + loot-restricted as belt-and-suspenders. Used by the ownerless
+     * autonomous SELL action — owner-driven bots keep their existing sell path.
+     */
+    static List<Item> collectSellTrashEtc(Character bot) {
+        List<Item> result = new ArrayList<>();
+        ItemInformationProvider ii = ItemInformationProvider.getInstance();
+        collectFromBag(bot, result, InventoryType.ETC, item ->
+                !ii.isDropRestricted(item.getItemId()) && ii.getPrice(item.getItemId(), 1) > 0);
+        return result;
+    }
+
     static List<Item> collectSellTrashEquips(BotEntry entry, Character bot) {
         List<Item> trash = collectTrashEquips(entry, bot);
         if (trash.isEmpty()) {

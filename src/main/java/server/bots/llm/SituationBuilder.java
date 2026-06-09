@@ -140,6 +140,12 @@ public final class SituationBuilder {
         try {
             sb.append(" | Meso: ").append(compactMeso(bot.getMeso()));
         } catch (Throwable ignored) {}
+        try {
+            client.inventory.Inventory etc = bot.getInventory(InventoryType.ETC);
+            int free = etc.getNumFreeSlot();
+            sb.append(" | Bag(ETC): ").append(etc.getSlotLimit() - free).append('/').append(etc.getSlotLimit());
+            if (free <= 2) sb.append(" FULL");
+        } catch (Throwable ignored) {}
         return sb.toString();
     }
 

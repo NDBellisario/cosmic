@@ -15,6 +15,7 @@ import server.life.NPC;
 import server.maps.Foothold;
 import server.maps.MapObject;
 import server.maps.MapObjectType;
+import server.maps.MapleMap;
 
 import java.awt.*;
 import java.util.ArrayList;
@@ -216,6 +217,62 @@ final class BotShopManager {
 
     private static int manhattan(Point a, Point b) {
         return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+    }
+
+    /**
+     * First NPC on {@code map} that has a usable shop, or null. Whole-map scan
+     * (NOT range-limited like {@link #findBestShop}) so the autonomous sell path
+     * can resolve a vendor on a town map the bot was teleported onto.
+     */
+    static NPC findShopNpcOnMap(MapleMap map) {
+        if (map == null) {
+            return null;
+        }
+        List<MapObject> objects = map.getMapObjectsInRange(
+                new Point(0, 0), Double.POSITIVE_INFINITY,
+                Arrays.asList(MapObjectType.NPC));
+        for (MapObject obj : objects) {
+            NPC npc = (NPC) obj;
+            if (npc.hasShop() && ShopFactory.getInstance().getShopForNPC(npc.getId()) != null) {
+                return npc;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Batch-sell ETC junk (full stacks) + junk equips (one at a time) at {@code npc}'s
+     * shop. Synchronous; the caller must already have the bot standing at the NPC and
+     * run this on the game thread. Returns the number of stacks/items sold.
+     */
+    static int sellJunkAtShop(BotEntry entry, Character bot, NPC npc) {
+        if (entry == null || bot == null || npc == null || bot.getClient() == null) {
+            return 0;
+        }
+        Shop shop = ShopFactory.getInstance().getShopForNPC(npc.getId());
+        if (shop == null) {
+            return 0;
+        }
+        int sold = 0;
+        for (Item item : BotInventoryManager.collectSellTrashEtc(bot)) {
+            if (!BotInventoryManager.hasItem(bot, item)) {
+                continue;
+            }
+            shop.sell(bot.getClient(), InventoryType.ETC, item.getPosition(), item.getQuantity());
+            if (!BotInventoryManager.hasItem(bot, item)) {
+                sold++;
+            }
+        }
+        for (Item item : BotInventoryManager.collectSellTrashEquips(entry, bot)) {
+            if (!BotInventoryManager.hasItem(bot, item)) {
+                continue;
+            }
+            shop.sell(bot.getClient(), InventoryType.EQUIP, item.getPosition(), (short) 1);
+            if (!BotInventoryManager.hasItem(bot, item)) {
+                sold++;
+            }
+        }
+        return sold;
     }
 
     private static NpcShopMatch findBestShop(Character bot, boolean allowAnyShop) {

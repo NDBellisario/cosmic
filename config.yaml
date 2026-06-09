@@ -198,9 +198,9 @@ server:
     LOGIN_ATTEMPT_DURATION: 120         #Period in seconds the login attempt remains registered on the system.
 
     #Ip Configuration
-    HOST: 127.0.0.1                 #Loopback for client netsh portproxy (setup-client-redirect.ps1)
-    LANHOST: 127.0.0.1             #Loopback so proxied LAN connections route back through the proxy
-    LOCALHOST: 127.0.0.1            #Loopback IPv4 address
+    HOST: 100.116.108.8            #Mac Tailscale IP - advertised to remote Tailscale clients
+    LANHOST: 100.116.108.8         #Mac Tailscale IP - same value so a Tailscale client gets it either way
+    LOCALHOST: 127.0.0.1            #Loopback for same-machine clients
     GMSERVER: false
 
     #Other configuration

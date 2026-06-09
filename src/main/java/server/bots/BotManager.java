@@ -937,7 +937,12 @@ public class BotManager {
         }
 
         List<BotEntry> entries = bots.get(owner.getId());
-        if (entries == null || entries.isEmpty()) return;
+        if (entries == null || entries.isEmpty()) {
+            // The speaker owns no bots, so the command pipeline above doesn't apply.
+            // But a nearby ownerless bot they address by name should still chat back.
+            maybeRespondToNonOwnerSay(owner, message, channel);
+            return;
+        }
 
         // Dismiss: disown bot, leaves it idle in map
         Matcher dm = DISMISS_PATTERN.matcher(message);
@@ -4043,9 +4048,11 @@ public class BotManager {
         switch (entry.replyChannel) {
             case PARTY -> botSayParty(entry.bot, text);
             case WHISPER -> {
-                Character owner = entry.owner;
-                if (owner != null && owner.getClient() != null) {
-                    owner.sendPacket(PacketCreator.getWhisperReceive(
+                // Whisper back to the owner, or — for an ownerless bot — to whoever
+                // last whispered it (a STRANGER conversation partner).
+                Character target = entry.owner != null ? entry.owner : entry.lastChatReplyTarget;
+                if (target != null && target.getClient() != null) {
+                    target.sendPacket(PacketCreator.getWhisperReceive(
                             entry.bot.getName(),
                             entry.bot.getClient().getChannel() - 1,
                             false, text));
@@ -4081,11 +4088,64 @@ public class BotManager {
             return;
         }
         BotEntry entry = getBotEntry(owner.getId(), target.getId());
+        if (entry != null) {
+            // Speaker owns this bot: existing command pipeline (owner relation).
+            entry.replyChannel = ReplyChannel.WHISPER;
+            entry.lastChatReplyTarget = owner;
+            BotChatManager.handleChat(entry, message);
+            return;
+        }
+        // Speaker does NOT own this bot. It may still be a live (e.g. ownerless)
+        // bot the speaker is talking to as a STRANGER. Locate its entry across all
+        // groups and hand the whisper to the LLM reply path (no command pipeline —
+        // strangers can't drive a bot, but the bot can still chat back).
+        entry = findEntryByBotCharId(target.getId());
         if (entry == null) {
             return;
         }
         entry.replyChannel = ReplyChannel.WHISPER;
-        BotChatManager.handleChat(entry, message);
+        entry.lastChatReplyTarget = owner;
+        if (server.bots.llm.BotLlmConfig.enabled) {
+            server.bots.llm.BotLlmReplyManager.maybeRespond(entry, owner, message);
+        }
+    }
+
+    /**
+     * Public "say" chat from a player who owns no bots. If the message names a bot
+     * standing on the same map (e.g. "Rudy hello"), let that bot chat back via the
+     * LLM as a STRANGER. Gated to name-addressed, same-map messages to avoid every
+     * ownerless bot in the map answering every line of public chat.
+     */
+    private void maybeRespondToNonOwnerSay(Character speaker, String message, ReplyChannel channel) {
+        if (!server.bots.llm.BotLlmConfig.enabled || speaker == null || message == null || message.isBlank()) {
+            return;
+        }
+        int mapId = speaker.getMapId();
+        String lower = message.toLowerCase(java.util.Locale.ENGLISH);
+        for (List<BotEntry> entries : bots.values()) {
+            for (BotEntry e : entries) {
+                if (e.owner != null) continue;                 // only ownerless bots
+                if (e.bot == null || e.bot.getMapId() != mapId) continue;
+                String botName = e.bot.getName();
+                if (botName == null || !lower.contains(botName.toLowerCase(java.util.Locale.ENGLISH))) continue;
+                e.replyChannel = channel;                       // reply on the channel they spoke on (MAP)
+                e.lastChatReplyTarget = speaker;
+                server.bots.llm.BotLlmReplyManager.maybeRespond(e, speaker, message);
+                return;                                         // one responder per message
+            }
+        }
+    }
+
+    /** Find a live bot entry by the bot character's own id, across all owner groups (incl. ownerless). */
+    private BotEntry findEntryByBotCharId(int botCharId) {
+        for (List<BotEntry> entries : bots.values()) {
+            for (BotEntry e : entries) {
+                if (e.bot.getId() == botCharId) {
+                    return e;
+                }
+            }
+        }
+        return null;
     }
 
     private boolean consumeAiTick(BotEntry entry) {

@@ -59,9 +59,12 @@ public final class BotLlmReplyManager {
         if (message == null || message.isBlank()) return;
 
         SenderRelation relation = SenderRelation.resolve(entry, sender);
-        // Strangers' whispers are dropped pre-LLM (whisper hook isn't wired in
-        // Phase 1 anyway, but defend in depth).
-        if (relation == SenderRelation.STRANGER && entry.getReplyChannel() == server.bots.ReplyChannel.WHISPER) {
+        // A stranger whispering an OWNED bot is dropped (it's not their bot to talk to).
+        // But an OWNERLESS bot has no owner to protect — the "stranger" is simply the
+        // player it's chatting with — so it SHOULD reply on whisper too.
+        if (relation == SenderRelation.STRANGER
+                && entry.getReplyChannel() == server.bots.ReplyChannel.WHISPER
+                && entry.getOwner() != null) {
             return;
         }
 

@@ -2,11 +2,17 @@ package server.bots.llm;
 
 import client.Character;
 import server.bots.BotEntry;
+import server.bots.planner.ContextFileLoader;
 
 import java.util.List;
 
 public final class PromptBuilder {
     private PromptBuilder() {}
+
+    /** Max SOUL chars to weave into the chat system prompt. Chat runs on a tight
+     *  budget (numCtx 2048, maxPredictTokens 24), so we cap the persona to avoid
+     *  crowding out the conversation. */
+    private static final int SOUL_CHAR_CAP = 400;
 
     public static String buildSystem(BotEntry entry, SenderRelation relation, String senderName) {
         Character bot = entry.getBot();
@@ -20,13 +26,40 @@ public final class PromptBuilder {
             case STRANGER -> "You are talking to " + senderName + ", a stranger you just met in the game.";
         };
 
+        String personaLine = (bot != null) ? buildPersonaLine(bot.getName()) : "";
+
         return "Your IGN is " + botName + ". "
                 + "You are a real human MapleStory player, level " + lvl + " " + job + ". "
+                + personaLine
                 + "Talk like mmo chatter: lowercase, 1 short sentence, abbreviate whenever possible, text only, use internet slang when applicable, no emoji, no speaker label. "
                 + "Keep replies simple. Prefer fragments over full grammar. "
                 + "Answer only the latest message directly. If unsure, say so briefly instead of guessing. "
                 + "Never say you are an ai, assistant, chatbot, or bot. "
                 + relationLine;
+    }
+
+    /** Builds a trimmed "who you are" line from the bot's SOUL.md, or "" if absent.
+     *  SOUL describes WHO the character is; the style rules govern HOW they type. */
+    private static String buildPersonaLine(String botName) {
+        String soul;
+        try {
+            soul = ContextFileLoader.loadSoul(botName);
+        } catch (RuntimeException e) {
+            return "";
+        }
+        if (soul == null || soul.isBlank()) {
+            return "";
+        }
+        String trimmed = soul.strip();
+        if (trimmed.length() > SOUL_CHAR_CAP) {
+            // Prefer cutting at a paragraph break within the cap, else hard-cut.
+            int cut = trimmed.lastIndexOf("\n\n", SOUL_CHAR_CAP);
+            trimmed = (cut > 0 ? trimmed.substring(0, cut) : trimmed.substring(0, SOUL_CHAR_CAP)).strip();
+        }
+        if (trimmed.isEmpty()) {
+            return "";
+        }
+        return "Stay in character as described here: " + trimmed + " ";
     }
 
     public static String buildPrompt(BotEntry entry, String senderName, String newMessage,

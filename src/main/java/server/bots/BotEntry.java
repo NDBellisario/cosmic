@@ -192,6 +192,12 @@ public class BotEntry {
     // Bot replies are routed to this channel until the next command changes it.
     volatile ReplyChannel replyChannel = ReplyChannel.MAP;
 
+    // Who the bot should direct its next WHISPER reply at. For owned bots this is
+    // normally the owner, but an OWNERLESS bot (owner == null) still needs to whisper
+    // back to whichever player just whispered it. Set when a chat is routed to this
+    // bot; botReply() falls back to it when owner is null.
+    volatile Character lastChatReplyTarget = null;
+
     // Pending two-step action
     String pendingAction = null;
     String pendingDropCategory = null;

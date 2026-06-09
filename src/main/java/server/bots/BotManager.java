@@ -3026,12 +3026,40 @@ public class BotManager {
      * what already happens when an owner goes offline.
      */
     public void issueRestInTown(BotEntry entry) {
-        if (entry == null || entry.bot == null || entry.bot.getMap() == null || entry.owner == null) {
+        if (entry == null || entry.bot == null || entry.bot.getMap() == null) {
+            return;
+        }
+        if (entry.isOwnerless()) {
+            issueOwnerlessRestInTown(entry);
             return;
         }
         clearScriptTasks(entry);
         enterOwnerInactiveSafeMode(entry, entry.bot, entry.owner.getId(),
                 shouldTownWarpForOwnerInactive(entry));
+    }
+
+    /**
+     * Ownerless "go to town and wait": an ownerless bot has no owner-inactive safe
+     * mode to fall into, so reuse the SELL teleport — jump to the nearest town and
+     * idle there. Runs as one game-thread task (map change must not happen off-tick).
+     * The planner keeps it parked via REST_IN_TOWN/IDLE until its goal says otherwise.
+     */
+    private void issueOwnerlessRestInTown(BotEntry entry) {
+        final Character bot = entry.bot;
+        TimerManager.getInstance().schedule(() -> {
+            try {
+                MapleMap town = resolveSellTownMap(bot.getMap());
+                if (town != null && town.getId() != bot.getMapId()) {
+                    teleportBotToMap(entry, bot, town);
+                    log.info("rest-in-town[{}] moved to {} (map {}), idling",
+                            bot.getName(), town.getMapName(), town.getId());
+                }
+                entry.grindTarget = null;
+                issueStop(entry);
+            } catch (Exception ex) {
+                log.warn("rest-in-town[{}] failed: {}", bot.getName(), ex.toString());
+            }
+        }, 0L);
     }
 
     /**

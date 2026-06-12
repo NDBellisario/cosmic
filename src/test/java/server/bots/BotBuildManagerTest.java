@@ -424,6 +424,87 @@ class BotBuildManagerTest {
         assertEquals(0, remainingAp.get());
     }
 
+    @Test
+    void defaultApBuildPerJobTreeMatchesChatDefaults() {
+        BotBuildManager.ApBuild warrior = BotBuildManager.defaultApBuild(Job.WARRIOR);
+        assertEquals(BotBuildManager.StatType.STR, warrior.primaryStat);
+        assertEquals(BotBuildManager.StatType.DEX, warrior.secondaryStat);
+
+        BotBuildManager.ApBuild mage = BotBuildManager.defaultApBuild(Job.IL_WIZARD);
+        assertEquals(BotBuildManager.StatType.INT, mage.primaryStat);
+        assertEquals(BotBuildManager.StatType.LUK, mage.secondaryStat);
+
+        BotBuildManager.ApBuild bowman = BotBuildManager.defaultApBuild(Job.HUNTER);
+        assertEquals(BotBuildManager.StatType.DEX, bowman.primaryStat);
+        assertEquals(BotBuildManager.StatType.STR, bowman.secondaryStat);
+
+        BotBuildManager.ApBuild thief = BotBuildManager.defaultApBuild(Job.ASSASSIN);
+        assertEquals(BotBuildManager.StatType.LUK, thief.primaryStat);
+        assertEquals(BotBuildManager.StatType.DEX, thief.secondaryStat);
+
+        assertNull(BotBuildManager.defaultApBuild(Job.PIRATE));
+    }
+
+    @Test
+    void defaultNextJobFollowsStandardPathPerTree() {
+        assertEquals(Job.WARRIOR, BotBuildManager.defaultNextJob(Job.BEGINNER, 10));
+        assertNull(BotBuildManager.defaultNextJob(Job.BEGINNER, 9));
+
+        assertEquals(Job.FIGHTER, BotBuildManager.defaultNextJob(Job.WARRIOR, 30));
+        assertEquals(Job.CRUSADER, BotBuildManager.defaultNextJob(Job.FIGHTER, 70));
+        assertEquals(Job.HERO, BotBuildManager.defaultNextJob(Job.CRUSADER, 120));
+
+        assertEquals(Job.IL_WIZARD, BotBuildManager.defaultNextJob(Job.MAGICIAN, 30));
+        assertEquals(Job.IL_MAGE, BotBuildManager.defaultNextJob(Job.IL_WIZARD, 70));
+        assertEquals(Job.IL_ARCHMAGE, BotBuildManager.defaultNextJob(Job.IL_MAGE, 120));
+
+        assertEquals(Job.HUNTER, BotBuildManager.defaultNextJob(Job.BOWMAN, 30));
+        assertEquals(Job.RANGER, BotBuildManager.defaultNextJob(Job.HUNTER, 70));
+        assertEquals(Job.BOWMASTER, BotBuildManager.defaultNextJob(Job.RANGER, 120));
+
+        assertEquals(Job.ASSASSIN, BotBuildManager.defaultNextJob(Job.THIEF, 30));
+        assertEquals(Job.HERMIT, BotBuildManager.defaultNextJob(Job.ASSASSIN, 70));
+        assertEquals(Job.NIGHTLORD, BotBuildManager.defaultNextJob(Job.HERMIT, 120));
+
+        assertNull(BotBuildManager.defaultNextJob(Job.WARRIOR, 29));
+        assertNull(BotBuildManager.defaultNextJob(Job.PIRATE, 30));
+    }
+
+    @Test
+    void ownerlessWarriorLevelUpSeedsDefaultApBuildAndSpendsAp() {
+        Character bot = mock(Character.class);
+        // owner == null marks the bot as ownerless
+        BotEntry entry = new BotEntry(bot, null, mock(ScheduledFuture.class));
+        int warriorBook = GameConstants.getSkillBook(Warrior.IMPROVED_HPREC / 10000);
+        int[] remainingSps = new int[5];
+        remainingSps[warriorBook] = 3;
+        Map<Integer, Integer> skillLevels = new HashMap<>();
+
+        // level 16: not an advancement level, so checkLevelUp stays on the auto-assign path
+        when(bot.getLevel()).thenReturn(16);
+        when(bot.getJob()).thenReturn(Job.WARRIOR);
+        when(bot.getRemainingAp()).thenReturn(5);
+        when(bot.getDex()).thenReturn(25);
+        stubSkillState(bot, remainingSps, skillLevels);
+        when(bot.getMasterLevel(any(Skill.class))).thenReturn(0);
+
+        try (MockedStatic<SkillFactory> skillFactory = mockStatic(SkillFactory.class)) {
+            skillFactory.when(() -> SkillFactory.getSkill(anyInt()))
+                    .thenAnswer(invocation -> mockSkill(invocation.getArgument(0), 20, false));
+
+            BotBuildManager.checkLevelUp(entry, bot);
+        }
+
+        // default warrior AP build was seeded with no owner prompt
+        assertEquals(BotBuildManager.StatType.STR, entry.apBuild.primaryStat);
+        assertEquals(BotBuildManager.StatType.DEX, entry.apBuild.secondaryStat);
+        // dex already above floor (25 >= 4) so all 5 AP dump into STR
+        verify(bot).assignStrDexIntLuk(5, 0, 0, 0);
+        // SP also auto-assigned per the warrior build (HP recovery first)
+        assertEquals(0, remainingSps[warriorBook]);
+        assertEquals(3, skillLevels.getOrDefault(Warrior.IMPROVED_HPREC, 0));
+    }
+
     private static void stubSkillState(Character bot, int[] remainingSps, Map<Integer, Integer> skillLevels) {
         when(bot.getRemainingSps()).thenReturn(remainingSps);
         when(bot.getSkillLevel(any(Skill.class))).thenAnswer(invocation -> {

@@ -39,6 +39,65 @@ class BotBuildManager {
         }
     }
 
+    /**
+     * Default AP build per job tree, used by ownerless bots that have no owner to ask.
+     * Matches the chat-driven "less"/"pure" defaults: secondary stat held at its job floor,
+     * everything else dumped into the primary stat.
+     *   warrior -> STR primary, DEX secondary
+     *   mage    -> INT primary, LUK secondary
+     *   bowman  -> DEX primary, STR secondary
+     *   thief   -> LUK primary, DEX secondary
+     * Returns null for unsupported branches (e.g. pirate) so behaviour is unchanged there.
+     */
+    static ApBuild defaultApBuild(Job job) {
+        if (job == null) {
+            return null;
+        }
+        if (job.isA(Job.WARRIOR)) {
+            return new ApBuild(StatType.STR, StatType.DEX, 4);
+        }
+        if (job.isA(Job.MAGICIAN)) {
+            return new ApBuild(StatType.INT, StatType.LUK, 4);
+        }
+        if (job.isA(Job.BOWMAN)) {
+            return new ApBuild(StatType.DEX, StatType.STR, 4);
+        }
+        if (job.isA(Job.THIEF)) {
+            return new ApBuild(StatType.LUK, StatType.DEX, 4);
+        }
+        return null;
+    }
+
+    /**
+     * Standard job advancement an ownerless bot takes at the given level, or null if none is due.
+     * Only branches the build/ skill plans cover are returned. A beginner becomes a WARRIOR at
+     * level 10 (the most build-complete, robust solo class); from there:
+     *   warrior->fighter->crusader->hero, mage->il wizard->il mage->il archmage,
+     *   bowman->hunter->ranger->bowmaster, thief->assassin->hermit->night lord.
+     * Pirate has no build plan and is left alone.
+     */
+    static Job defaultNextJob(Job job, int level) {
+        if (job == null) {
+            return null;
+        }
+        return switch (job) {
+            case BEGINNER -> level >= 10 ? Job.WARRIOR : null;
+            case WARRIOR -> level >= 30 ? Job.FIGHTER : null;
+            case FIGHTER -> level >= 70 ? Job.CRUSADER : null;
+            case CRUSADER -> level >= 120 ? Job.HERO : null;
+            case MAGICIAN -> level >= 30 ? Job.IL_WIZARD : null;
+            case IL_WIZARD -> level >= 70 ? Job.IL_MAGE : null;
+            case IL_MAGE -> level >= 120 ? Job.IL_ARCHMAGE : null;
+            case BOWMAN -> level >= 30 ? Job.HUNTER : null;
+            case HUNTER -> level >= 70 ? Job.RANGER : null;
+            case RANGER -> level >= 120 ? Job.BOWMASTER : null;
+            case THIEF -> level >= 30 ? Job.ASSASSIN : null;
+            case ASSASSIN -> level >= 70 ? Job.HERMIT : null;
+            case HERMIT -> level >= 120 ? Job.NIGHTLORD : null;
+            default -> null;
+        };
+    }
+
     /** Stores the AP build, confirms it to the owner, and immediately spends any pending AP. */
     static void setApBuild(BotEntry entry, ApBuild build, String confirmMsg) {
         entry.apBuild = build;
@@ -313,19 +372,72 @@ class BotBuildManager {
 
         int prev = entry.lastKnownLevel;
         entry.lastKnownLevel = lvl;
+
+        // Ownerless bots have no owner to prompt: pick sensible defaults so they self-build
+        // and self-advance. autoAdvanceOwnerless() advances the job (which re-runs SP/AP via
+        // handleJobAdvance) and returns true when it did, so we don't double-assign here.
+        boolean advanced = false;
+        if (entry.owner == null) {
+            ensureOwnerlessDefaults(entry, bot);
+            advanced = autoAdvanceOwnerless(entry, bot);
+        }
+
         if (prev == -1) {
-            autoAssignSp(entry, bot);
-            autoAssignAp(entry, bot);
+            if (!advanced) {
+                autoAssignSp(entry, bot);
+                autoAssignAp(entry, bot);
+            }
             return;
         }
 
-        if (lvl == 8 || lvl == 10 || lvl == 30 || lvl == 70 || lvl == 120) {
+        if (entry.owner != null && (lvl == 8 || lvl == 10 || lvl == 30 || lvl == 70 || lvl == 120)) {
             BotManager.getInstance().issueFollowOwner(entry);
             BotChatManager.checkBotStatus(entry, bot);
         }
 
-        autoAssignSp(entry, bot);
-        autoAssignAp(entry, bot);
+        if (!advanced) {
+            autoAssignSp(entry, bot);
+            autoAssignAp(entry, bot);
+        }
+    }
+
+    /**
+     * Ownerless bots can't be asked, so seed the default AP build for the current job tree and
+     * auto-pick the Hero SP variant. No-op once defaults (or owner choices) are already set.
+     */
+    private static void ensureOwnerlessDefaults(BotEntry entry, Character bot) {
+        if (entry.apBuild == null) {
+            ApBuild build = defaultApBuild(bot.getJob());
+            if (build != null) {
+                entry.apBuild = build;
+            }
+        }
+        if (bot.getJob() == Job.HERO && entry.spVariant == null) {
+            entry.spVariant = "1h";
+        }
+    }
+
+    /**
+     * Advances an ownerless bot along the standard path for its tree when it hits an advancement
+     * level. Returns true if a job change happened (advanceJob re-runs SP/AP allocation), false
+     * otherwise. Only one advancement per call; the next tick handles any further levels.
+     */
+    private static boolean autoAdvanceOwnerless(BotEntry entry, Character bot) {
+        Job next = defaultNextJob(bot.getJob(), bot.getLevel());
+        if (next == null) {
+            return false;
+        }
+        // Seed the AP build for the post-advance job before changing job, so the AP allocation
+        // that advanceJob() triggers (handleJobAdvance -> autoAssignAp) has a build to follow.
+        // The first job advancement (Beginner -> 1st job) is when stats first get a build.
+        if (entry.apBuild == null) {
+            ApBuild build = defaultApBuild(next);
+            if (build != null) {
+                entry.apBuild = build;
+            }
+        }
+        BotStarterKitManager.advanceJob(entry, next);
+        return true;
     }
 
     /** Returns the next job-advancement prompt, or null if none is pending. */

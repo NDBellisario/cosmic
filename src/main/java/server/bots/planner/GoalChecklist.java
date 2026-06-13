@@ -111,7 +111,7 @@ public final class GoalChecklist {
             if (!changed) return false;
             Path tmp = path.resolveSibling("GOAL.md.tmp");
             Files.writeString(tmp, String.join("\n", lines), StandardCharsets.UTF_8);
-            Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING);
+            Files.move(tmp, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             ContextFileLoader.invalidate(botName, "GOAL.md");
             return true;
         } catch (IOException e) {
@@ -169,7 +169,7 @@ public final class GoalChecklist {
             // Atomic-ish write: temp file + move, so a reader never sees a half-written GOAL.md.
             Path tmp = path.resolveSibling("GOAL.md.tmp");
             Files.writeString(tmp, String.join("\n", lines), StandardCharsets.UTF_8);
-            Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING);
+            Files.move(tmp, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             ContextFileLoader.invalidate(botName, "GOAL.md");
             return changed;
         } catch (IOException e) {

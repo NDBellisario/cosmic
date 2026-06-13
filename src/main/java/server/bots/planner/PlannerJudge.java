@@ -55,7 +55,10 @@ public final class PlannerJudge {
     static List<CompletionVerdict> judge(BotEntry entry, List<GoalChecklist.Goal> openGoals) {
         if (entry == null || openGoals == null || openGoals.isEmpty()) return List.of();
         String prompt = buildPrompt(openGoals, SituationBuilder.buildForPlanner(entry));
-        Optional<String> raw = OllamaClient.generateJson(prompt, SYSTEM, BotLlmConfig.plannerMaxTokens);
+        // Completion is a classification: run near-deterministic so the same state
+        // yields the same verdict (chat temperature would make the judge flip-flop).
+        Optional<String> raw = OllamaClient.generateJson(prompt, SYSTEM,
+                BotLlmConfig.plannerMaxTokens, BotLlmConfig.plannerJudgeTemperature);
         if (raw.isEmpty()) return List.of();
         List<CompletionVerdict> verdicts = parse(raw.get());
         String botName = entry.getBot() != null ? entry.getBot().getName() : "?";

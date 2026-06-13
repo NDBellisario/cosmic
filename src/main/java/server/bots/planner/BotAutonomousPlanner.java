@@ -129,6 +129,18 @@ public final class BotAutonomousPlanner {
 
         /** No flip this tick — advance and return ticks-without-progress. */
         int tickNoProgress() { return ++ticksSinceProgress; }
+
+        private boolean escalated = false;
+
+        /** True exactly once per all-done batch, so the Tier-1 escalation fires once. */
+        boolean markEscalatedOnce() {
+            if (escalated) return false;
+            escalated = true;
+            return true;
+        }
+
+        /** Open goals exist again (a new batch) — re-arm escalation. */
+        void clearEscalated() { escalated = false; }
     }
 
     /**
@@ -376,13 +388,21 @@ public final class BotAutonomousPlanner {
      * single safe edit; the SLM only judges. Emits {@code [LOOP]} markers throughout.
      */
     private static void judgeAndMark(BotEntry entry, String botName, String goal) {
-        List<GoalChecklist.Goal> open = GoalChecklist.parse(goal).stream()
+        List<GoalChecklist.Goal> all = GoalChecklist.parse(goal);
+        List<GoalChecklist.Goal> open = all.stream()
                 .filter(g -> "open".equals(g.status()))
                 .toList();
-        if (open.isEmpty()) {
-            return;  // nothing open to judge (all-done -> Tier-1 escalation is Phase 4)
-        }
         CompletionTracker tracker = TRACKERS.computeIfAbsent(entry.getBot().getId(), k -> new CompletionTracker());
+        if (open.isEmpty()) {
+            // Batch complete: every goal is done. Signal the Tier-1 planner (the only
+            // content-writer) to review and author the next GOAL.md — exactly once.
+            if (!all.isEmpty() && tracker.markEscalatedOnce()) {
+                log.info("[LOOP] step=escalate bot={} signal=planner reason=\"all {} goals complete, awaiting next GOAL.md\"",
+                        botName, all.size());
+            }
+            return;
+        }
+        tracker.clearEscalated();  // open goals present -> a fresh batch from Tier-1
 
         List<PlannerJudge.CompletionVerdict> verdicts = PlannerJudge.judge(entry, open);
         Map<String, PlannerJudge.CompletionVerdict> byId = new HashMap<>();

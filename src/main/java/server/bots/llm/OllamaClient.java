@@ -26,7 +26,7 @@ public final class OllamaClient {
     private OllamaClient() {}
 
     public static Optional<String> generate(String prompt, String system) {
-        return send(prompt, system, BotLlmConfig.maxPredictTokens, BotLlmConfig.requestTimeoutMs, false);
+        return send(prompt, system, BotLlmConfig.maxPredictTokens, BotLlmConfig.requestTimeoutMs, false, BotLlmConfig.temperature);
     }
 
     /** Variant for non-chat calls (e.g. memory summarization) where we want a bigger
@@ -34,19 +34,21 @@ public final class OllamaClient {
     public static Optional<String> generateLong(String prompt, String system, int numPredict) {
         // Rough scale: small CPU produces ~10 tok/s, so allow numPredict*200ms + base.
         int timeoutMs = Math.max(BotLlmConfig.requestTimeoutMs, 5000 + numPredict * 200);
-        return send(prompt, system, numPredict, timeoutMs, false);
+        return send(prompt, system, numPredict, timeoutMs, false, BotLlmConfig.temperature);
     }
 
     /** Constrained-JSON variant: tells Ollama {@code "format":"json"} so the model
      *  emits valid JSON only (no prose). More reliable than free-form at 1-3B —
-     *  used by the planner's judge_completion / emit_task structured calls. */
-    public static Optional<String> generateJson(String prompt, String system, int numPredict) {
+     *  used by the planner's judge_completion / emit_task structured calls.
+     *  {@code temperature} lets a judge run near-deterministic (classification),
+     *  distinct from the creative chat default. */
+    public static Optional<String> generateJson(String prompt, String system, int numPredict, double temperature) {
         int timeoutMs = Math.max(BotLlmConfig.requestTimeoutMs, 5000 + numPredict * 200);
-        return send(prompt, system, numPredict, timeoutMs, true);
+        return send(prompt, system, numPredict, timeoutMs, true, temperature);
     }
 
-    private static Optional<String> send(String prompt, String system, int numPredict, int timeoutMs, boolean formatJson) {
-        String body = buildBody(prompt, system, numPredict, formatJson);
+    private static Optional<String> send(String prompt, String system, int numPredict, int timeoutMs, boolean formatJson, double temperature) {
+        String body = buildBody(prompt, system, numPredict, formatJson, temperature);
         HttpRequest req;
         try {
             req = HttpRequest.newBuilder(URI.create(BotLlmConfig.endpoint + "/api/generate"))
@@ -76,7 +78,7 @@ public final class OllamaClient {
         }
     }
 
-    private static String buildBody(String prompt, String system, int numPredict, boolean formatJson) {
+    private static String buildBody(String prompt, String system, int numPredict, boolean formatJson, double temperature) {
         StringBuilder sb = new StringBuilder(384);
         sb.append('{');
         sb.append("\"model\":\"").append(jsonEscape(BotLlmConfig.model)).append("\",");
@@ -96,7 +98,7 @@ public final class OllamaClient {
         }
         sb.append("\"options\":{")
                 .append("\"num_predict\":").append(numPredict)
-                .append(",\"temperature\":").append(BotLlmConfig.temperature)
+                .append(",\"temperature\":").append(temperature)
                 .append(",\"top_p\":").append(BotLlmConfig.topP)
                 .append(",\"top_k\":").append(BotLlmConfig.topK)
                 .append(",\"min_p\":").append(BotLlmConfig.minP)

@@ -7,10 +7,15 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -82,6 +87,53 @@ class GoalChecklistTest {
             if (before[i].contains("g1:")) continue; // the one intentionally-changed line
             assertEquals(before[i], now[i], "line " + i + " changed unexpectedly");
         }
+    }
+
+    @Test
+    void concurrentReadsNeverSeeATornFileDuringFlips(@TempDir Path dir) throws Exception {
+        // Phase 4 concurrency guardrail: GOAL.md is read every tick AND by ChatResponder
+        // while the harness flips a flag. The temp+rename write must guarantee a reader
+        // sees the whole old or whole new file — never a half-written one.
+        Path botDir = dir.resolve("TestBot");
+        Files.createDirectories(botDir);
+        Path goalPath = botDir.resolve("GOAL.md");
+        Files.writeString(goalPath, GOAL, StandardCharsets.UTF_8);
+
+        AtomicReference<Throwable> err = new AtomicReference<>();
+        AtomicBoolean stop = new AtomicBoolean(false);
+        AtomicInteger reads = new AtomicInteger();
+
+        Thread reader = new Thread(() -> {
+            try {
+                while (!stop.get()) {
+                    String content = Files.readString(goalPath, StandardCharsets.UTF_8);
+                    int n = GoalChecklist.parse(content).size();
+                    if (n != 3) throw new AssertionError("torn read (" + n + " goals):\n" + content);
+                    reads.incrementAndGet();
+                }
+            } catch (Throwable t) {
+                err.set(t);
+            }
+        });
+        reader.start();
+
+        // Hammer atomic flips + resets so g1 toggles done<->open many times under the reader.
+        for (int i = 0; i < 300 && err.get() == null; i++) {
+            GoalChecklist.markCompleteAt(goalPath, "TestBot", "g1", "level=30", "ts");
+            atomicReset(goalPath, GOAL);
+        }
+        stop.set(true);
+        reader.join(2000);
+
+        assertNull(err.get(), () -> "torn read detected: " + err.get());
+        assertTrue(reads.get() > 0, "reader never executed");
+    }
+
+    /** Atomic temp+rename, mirroring GoalChecklist's own write, to reset g1 to open. */
+    private static void atomicReset(Path p, String content) throws IOException {
+        Path tmp = p.resolveSibling("reset.tmp");
+        Files.writeString(tmp, content, StandardCharsets.UTF_8);
+        Files.move(tmp, p, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
     }
 
     @Test

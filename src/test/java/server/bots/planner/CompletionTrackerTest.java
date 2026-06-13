@@ -68,4 +68,14 @@ class CompletionTrackerTest {
         t.onProgress();
         assertEquals(1, t.tickNoProgress(), "a flip resets ticks-without-progress");
     }
+
+    @Test
+    void escalationFiresOncePerBatchAndReArmsOnNewGoals() {
+        var t = new BotAutonomousPlanner.CompletionTracker();
+        assertTrue(t.markEscalatedOnce(), "first all-done tick signals Tier-1");
+        assertFalse(t.markEscalatedOnce(), "subsequent all-done ticks stay silent");
+        assertFalse(t.markEscalatedOnce());
+        t.clearEscalated();                       // Tier-1 wrote a fresh batch
+        assertTrue(t.markEscalatedOnce(), "re-arms to signal the next completed batch");
+    }
 }

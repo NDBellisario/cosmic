@@ -104,6 +104,10 @@ public final class BotLlmConfig {
     // Stuck-detector K: if no goal completes for this many ticks while goals remain
     // open, signal the Tier-1 planner to review (escape a stubborn false negative).
     public static volatile int plannerStuckTicks = 5;
+    // Temperature for the judge_completion call. Completion is a CLASSIFICATION, not
+    // creative chat — it must be near-deterministic so the same state yields the same
+    // verdict run-to-run (the chat default of 1.0 makes the judge flip-flop randomly).
+    public static volatile double plannerJudgeTemperature = 0.0;
     // Directory holding per-bot personality/goal context files (SOUL.md, GOAL.md).
     // Layout: <plannerDataDir>/<botName>/SOUL.md etc.
     public static volatile String plannerDataDir = "bots/agent-data";

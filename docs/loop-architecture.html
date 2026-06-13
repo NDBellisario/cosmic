@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cosmic Bot — Autonomous Decision Loop &amp; 3-Tier Architecture</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --line:#30363d;
+    --ink:#e6edf3; --mut:#9da7b3; --dim:#6e7681;
+    --t1:#a371f7; --t1b:#2a1f3d;   /* Tier 1 — orchestration (Opus) */
+    --t2:#e3b341; --t2b:#332b14;   /* Tier 2 — decision (SLM)      */
+    --t3:#3fb950; --t3b:#11301c;   /* Tier 3 — execution (Cosmic)  */
+    --blue:#58a6ff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{max-width:1060px;margin:0 auto;padding:40px 22px 80px;}
+  h1{font-size:30px;margin:0 0 4px;letter-spacing:-.02em}
+  h2{font-size:14px;text-transform:uppercase;letter-spacing:.12em;color:var(--mut);
+     margin:44px 0 16px;border-bottom:1px solid var(--line);padding-bottom:8px}
+  .sub{color:var(--mut);margin:0 0 8px;font-size:16px}
+  code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.86em}
+  .tag{display:inline-block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+    padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--mut)}
+
+  /* tier stack */
+  .tier{border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin:14px 0;position:relative;overflow:hidden}
+  .tier::before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px}
+  .t1{background:linear-gradient(180deg,var(--t1b),var(--panel));} .t1::before{background:var(--t1)}
+  .t2{background:linear-gradient(180deg,var(--t2b),var(--panel));} .t2::before{background:var(--t2)}
+  .t3{background:linear-gradient(180deg,var(--t3b),var(--panel));} .t3::before{background:var(--t3)}
+  .tier h3{margin:0 0 2px;font-size:19px}
+  .tier .who{font-size:13px;color:var(--mut);margin-bottom:12px}
+  .pill{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:6px;margin-left:8px;vertical-align:middle}
+  .p1{background:var(--t1);color:#1a1024} .p2{background:var(--t2);color:#241c06} .p3{background:var(--t3);color:#06210f}
+  .role{display:grid;grid-template-columns:1fr 1fr;gap:8px 22px;margin-top:6px}
+  .role div{font-size:13.5px;color:var(--ink)}
+  .role b{color:var(--mut);font-weight:600}
+  .flowarrow{text-align:center;color:var(--dim);font-size:22px;margin:-4px 0;line-height:1}
+  .flowarrow small{display:block;font-size:11px;letter-spacing:.05em;color:var(--dim);text-transform:uppercase;margin-top:-2px}
+
+  /* loop */
+  .loop{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:8px 0 6px}
+  .step{background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:13px 13px 14px}
+  .step .n{font-size:11px;color:var(--t2);font-weight:700;letter-spacing:.08em}
+  .step h4{margin:3px 0 5px;font-size:15px}
+  .step p{margin:0;font-size:12.5px;color:var(--mut)}
+  .step .who{font-size:11px;margin-top:8px;color:var(--dim)}
+  .who .slm{color:var(--t2)} .who .det{color:var(--t3)}
+  @media(max-width:760px){.loop{grid-template-columns:1fr 1fr}.role{grid-template-columns:1fr}}
+
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:15px 16px}
+  .card h4{margin:0 0 6px;font-size:15px}
+  .card p{margin:0;color:var(--mut);font-size:13px}
+  .card .k{color:var(--blue)}
+
+  .principles li{margin:7px 0;color:var(--ink)}
+  .principles li b{color:var(--t2)}
+  .verified{background:var(--t3b);border:1px solid #1c5b2f;border-radius:11px;padding:14px 16px}
+  .verified h4{margin:0 0 8px;color:#7ee787}
+  .verified .row{display:flex;gap:10px;align-items:flex-start;margin:6px 0;font-size:13.5px}
+  .verified .row .c{color:var(--t3);font-weight:700}
+  pre{background:#0a0e14;border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow:auto;
+      color:#c9d1d9;font-size:12.5px;line-height:1.55}
+  .kw{color:var(--t2)} .id{color:var(--blue)} .ok{color:var(--t3)} .no{color:#f85149} .cm{color:var(--dim)}
+  footer{margin-top:50px;color:var(--dim);font-size:12px;border-top:1px solid var(--line);padding-top:16px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <span class="tag">Cosmic · autonomous companion</span>
+  <h1>The Autonomous Decision Loop</h1>
+  <p class="sub">A three-tier architecture: a planner that <em>writes</em> goals, an SLM that <em>judges &amp; chooses</em>, and a game engine that <em>acts</em> — joined by one narrow contract.</p>
+
+  <h2>The three tiers</h2>
+  <p style="color:var(--mut);margin-top:-4px">Each tier owns one job and hands a narrow artifact to the next. The boundaries are the whole design: a small, unreliable model is only ever asked to do what it is good at, and everything it can get wrong is observable, reversible, or vetoed downstream.</p>
+
+  <div class="tier t1">
+    <h3>Tier 1 — Orchestration <span class="pill p1">Claude Opus · offline</span></h3>
+    <div class="who">The strategist. Authors what the bot should <em>want</em>.</div>
+    <div class="role">
+      <div><b>Writes</b> SOUL.md (personality) &amp; GOAL.md (the goal list + content)</div>
+      <div><b>Grounded by</b> world-index (grind / quest / gear, from real WZ + DB data)</div>
+      <div><b>Owns</b> goal <em>content</em> exclusively — the only writer of goal text</div>
+      <div><b>Reviews</b> the SLM's completion disagreements; re-authors on escalation</div>
+    </div>
+  </div>
+  <div class="flowarrow">▼<small>GOAL.md — goal content (Tier&nbsp;1 writes, Tier&nbsp;2 only flips status)</small></div>
+
+  <div class="tier t2">
+    <h3>Tier 2 — Decision <span class="pill p2">SLM · qwen2.5:7b · in-JVM</span></h3>
+    <div class="who">The judgment layer. Reads the world, decides <em>what to do next</em> — never reimplements how.</div>
+    <div class="role">
+      <div><b>Reads</b> GOAL.md + live game state every tick (sweep 8s / heartbeat 60s)</div>
+      <div><b>Judges</b> which goals are complete (with literal evidence)</div>
+      <div><b>Flips</b> only the per-goal <em>status flag</em> — never the goal text</div>
+      <div><b>Emits</b> one action from a fixed vocabulary; the harness owns control flow</div>
+    </div>
+    <p style="font-size:12px;color:var(--dim);margin:12px 0 0">Prototype today: in-process Java (<code>BotAutonomousPlanner</code>) calling Ollama. Destined to become an external per-bot agent (Rust) for production perf — same contract, different host.</p>
+  </div>
+  <div class="flowarrow">▼<small>BotTask — one action from a fixed vocabulary</small></div>
+
+  <div class="tier t3">
+    <h3>Tier 3 — Execution <span class="pill p3">Cosmic engine · Java · deterministic</span></h3>
+    <div class="who">The body. A battle-tested 61-file framework that turns a chosen action into pixels.</div>
+    <div class="role">
+      <div><b>Executes</b> BotTasks: A* navigation, combat, movement, inventory</div>
+      <div><b>Auto-handles</b> AP/SP + job advancement, gear optimize/buy, potions</div>
+      <div><b>Deterministic</b> — no SLM ever runs on the game-tick thread</div>
+      <div><b>Reports</b> state back up via the situation snapshot each tick</div>
+    </div>
+  </div>
+
+  <h2>Tier 2 in detail — the read → judge → mark → emit loop</h2>
+  <p style="color:var(--mut);margin-top:-4px">Every tick runs four steps. Completion judgment and task choice are <em>two separate</em> constrained-JSON calls — never overloaded into one generation — and the harness, not the model, owns the sequencing.</p>
+  <div class="loop">
+    <div class="step"><div class="n">STEP 1</div><h4>read</h4><p>Load GOAL.md + build the game-state snapshot. Parse the open goals.</p><div class="who det">deterministic</div></div>
+    <div class="step"><div class="n">STEP 2</div><h4>judge_completion</h4><p>SLM verdict per open goal: <code>{complete, evidence}</code> — evidence is a literal <code>key=value</code> from state.</p><div class="who slm">SLM · constrained JSON</div></div>
+    <div class="step"><div class="n">STEP 3</div><h4>mark</h4><p>Two-tick-confirmed goals get their status flag flipped <code>done</code> — atomically, content untouched. All done → escalate Tier&nbsp;1.</p><div class="who det">deterministic + atomic write</div></div>
+    <div class="step"><div class="n">STEP 4</div><h4>emit_task</h4><p>SLM picks ONE action for the current state → <code>BotTask</code> → Tier&nbsp;3 executes.</p><div class="who slm">SLM · constrained JSON</div></div>
+  </div>
+  <div class="flowarrow" style="margin-top:6px">↺<small>loop — harness owns it; the SLM occupies steps 2 &amp; 4 only</small></div>
+
+  <h2>Why it survives a small, unreliable model</h2>
+  <ul class="principles" style="padding-left:18px;margin-top:-2px">
+    <li><b>Deterministic / probabilistic split.</b> Facts, thresholds, sequencing, and writes live in code. The SLM only makes soft judgments — “is this done?”, “what next?” — never arithmetic or control flow.</li>
+    <li><b>Content vs. status ownership.</b> Tier 1 owns goal <em>text</em>; the harness only toggles a per-goal status flag. The model can never corrupt the goals themselves.</li>
+    <li><b>Two-tick confirmation.</b> A goal must be judged complete on two consecutive ticks before its flag flips — a single false-positive judgment is vetoed by the next tick.</li>
+    <li><b>Literal evidence.</b> Every verdict cites a copied <code>key=value</code> from state (<code>level=35</code>), never prose — so the SLM-vs-Opus disagreement set is auditable.</li>
+    <li><b>Stuck-detector.</b> If a stubborn false-negative stalls the batch, after K ticks the harness signals Tier 1 anyway — one bad judgment can’t freeze the bot forever.</li>
+    <li><b>Atomic writes.</b> GOAL.md is read every tick (and by the chat responder) while it’s flipped; the write is temp-file + <code>rename(2)</code>, so a reader never sees a torn file.</li>
+    <li><b>Constrained JSON.</b> Both SLM calls force <code>format:"json"</code> — far more reliable than free-form function-calling at 1–3B.</li>
+  </ul>
+
+  <h2>The grounding substrate</h2>
+  <div class="grid">
+    <div class="card"><h4>world-index <span class="tag">SQLite, from WZ + MySQL</span></h4><p><span class="k">grind</span> (where to hunt) · <span class="k">questroute</span> (what to do) · <span class="k">gear / sources</span> (what to wear &amp; where to get it). Tier 1 queries it so every authored goal cites a real id.</p></div>
+    <div class="card"><h4>SOUL.md / GOAL.md <span class="tag">per bot, hot-reloaded</span></h4><p>SOUL = who the bot is (drives chat <em>and</em> decisions). GOAL = the ordered goal list with harness-owned status flags. Both reload live every tick.</p></div>
+  </div>
+
+  <h2>Verified end-to-end (live, on running bots)</h2>
+  <div class="verified">
+    <h4>The loop &amp; its safeguards, observed in production logs</h4>
+    <div class="row"><span class="c">✓</span><div><b>Flip exactly once, after two consecutive done-judgments.</b> A genuinely-complete goal (<code>level=35</code> ≥ 30) flipped on the 2nd consecutive verdict — and only then.</div></div>
+    <div class="row"><span class="c">✓</span><div><b>Two-tick vetoed a false positive.</b> The 7b judged “earn 10m mesos” done at 5m on one tick; the next tick disagreed, the counter reset, and it did <em>not</em> flip.</div></div>
+    <div class="row"><span class="c">✓</span><div><b>Stuck-detector caught a false negative.</b> The 7b stubbornly refused to mark “reach level 33” done at level 35; after 5 ticks the harness signalled Tier 1 anyway — the batch never froze.</div></div>
+    <div class="row"><span class="c">✓</span><div><b>Atomic write holds under concurrent reads.</b> A reader looping over GOAL.md during 300 flips never saw a torn file (the test drove a <code>rename(2)</code> hardening).</div></div>
+  </div>
+
+  <pre><span class="cm"># a real tick, from the logs — judge is separate from emit, every step tagged</span>
+[LOOP] step=<span class="kw">read</span>  bot=Vesper openGoals=2
+[LOOP] step=<span class="kw">judge</span> bot=Vesper goal=<span class="id">g1</span> complete=<span class="ok">true</span>  evidence=<span class="ok">"level=35"</span>
+[LOOP] step=<span class="kw">judge</span> bot=Vesper goal=<span class="id">g2</span> complete=<span class="no">false</span> evidence="level=35"   <span class="cm"># 7b false-negative</span>
+[LOOP] step=<span class="kw">mark</span>  bot=Vesper goal=<span class="id">g1</span> complete=<span class="ok">true</span>  evidence=<span class="ok">"level=35"</span>   <span class="cm"># 2nd consecutive → flip</span>
+[LOOP] step=<span class="kw">emit</span>  bot=Vesper action=GRIND
+   <span class="cm">… g2 stays open … after K=5 stalled ticks …</span>
+[LOOP] step=<span class="kw">stuck</span> bot=Vesper signal=<span class="id">planner</span> reason="no completion progress in 5 ticks"</pre>
+
+  <footer>
+    Cosmic autonomous companion · Tier-2 prototype is in-JVM Java (<code>server.bots.planner</code>), production target is an external per-bot Rust agent over the same GOAL.md + BotTask contract. Refactor delivered in four gated phases (schema → split → wire → safeguards), each unit- and live-tested.
+  </footer>
+</div>
+</body>
+</html>

@@ -191,4 +191,48 @@ class BotShopManagerTest {
         when(npc.getPosition()).thenReturn(new Point(position));
         return npc;
     }
+
+    // --- equip-upgrade buy planner (ownerless gear buying) ---
+
+    @Test
+    void planBuysCheapestUpgradesFirstUnderMesoBudget() {
+        // Two upgrades the optimizer wants; bot can only afford the cheaper one above reserve.
+        BotShopManager.EquipUpgrade cheap = new BotShopManager.EquipUpgrade((short) 0, 1040000, 1000);
+        BotShopManager.EquipUpgrade pricey = new BotShopManager.EquipUpgrade((short) 1, 1040001, 9000);
+
+        List<BotShopManager.EquipUpgrade> plan = BotShopManager.planEquipUpgradeBuys(
+                List.of(pricey, cheap), /*meso*/ 6500, /*freeSlots*/ 8, /*reserve*/ 5000);
+
+        assertEquals(1, plan.size());
+        assertEquals(cheap, plan.get(0)); // cheapest-first; pricey would break the reserve
+    }
+
+    @Test
+    void planSkipsUpgradesThatWouldBreakMesoReserve() {
+        BotShopManager.EquipUpgrade up = new BotShopManager.EquipUpgrade((short) 0, 1040000, 2000);
+        // meso 6000, reserve 5000 -> only 1000 spendable, so the 2000-meso item is skipped.
+        List<BotShopManager.EquipUpgrade> plan = BotShopManager.planEquipUpgradeBuys(
+                List.of(up), 6000, 8, 5000);
+        assertTrue(plan.isEmpty());
+    }
+
+    @Test
+    void planRespectsFreeBagSlots() {
+        BotShopManager.EquipUpgrade a = new BotShopManager.EquipUpgrade((short) 0, 1040000, 100);
+        BotShopManager.EquipUpgrade b = new BotShopManager.EquipUpgrade((short) 1, 1040001, 100);
+        // Plenty of meso, but only one free equip slot -> buy exactly one.
+        List<BotShopManager.EquipUpgrade> plan = BotShopManager.planEquipUpgradeBuys(
+                List.of(a, b), 1_000_000, /*freeSlots*/ 1, 5000);
+        assertEquals(1, plan.size());
+    }
+
+    @Test
+    void planBuysAtMostOnePerShopSlot() {
+        // Same shop slot offered twice (anti-spam): plan should keep only one.
+        BotShopManager.EquipUpgrade first = new BotShopManager.EquipUpgrade((short) 3, 1040000, 100);
+        BotShopManager.EquipUpgrade dup = new BotShopManager.EquipUpgrade((short) 3, 1040000, 100);
+        List<BotShopManager.EquipUpgrade> plan = BotShopManager.planEquipUpgradeBuys(
+                List.of(first, dup), 1_000_000, 8, 5000);
+        assertEquals(1, plan.size());
+    }
 }

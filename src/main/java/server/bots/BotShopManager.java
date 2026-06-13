@@ -1,6 +1,7 @@
 package server.bots;
 
 import client.Character;
+import client.inventory.Equip;
 import client.inventory.InventoryType;
 import client.inventory.Item;
 import client.inventory.WeaponType;
@@ -21,8 +22,11 @@ import java.awt.*;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -43,6 +47,9 @@ final class BotShopManager {
     private static final int POT_TARGET_THRESHOLD = 5; // full target when buying at shop
     private static final int AMMO_TRIGGER_THRESHOLD = 8;
     private static final int AMMO_TARGET_THRESHOLD = 10; // full target when buying at shop
+    // Meso kept in reserve when an ownerless bot buys gear, so it can still afford a pot/ammo
+    // resupply on the same (or next) visit. Equipment buys never spend below this floor.
+    private static final int EQUIP_BUY_MESO_RESERVE = 5000;
 
     private BotShopManager() {}
 
@@ -352,6 +359,11 @@ final class BotShopManager {
             }
             return sequence;
         });
+        // Ownerless bots opportunistically buy gear upgrades the optimizer would actually wear.
+        // Owner-driven bots get gear from the owner via trade/offers, so we don't change that path.
+        if (entry.getOwner() == null) {
+            actions.add((sequence, shop) -> buyEquipUpgradesStep(sequence, shop));
+        }
 
         runPurchaseStep(new PurchaseSequence(entry, bot, npcPos, actions, new ArrayList<>(), null), 0);
     }
@@ -703,6 +715,126 @@ final class BotShopManager {
         }
 
         return new BuyReport(item.shopItem.getItemId(), totalBought, desiredQuantity, reason);
+    }
+
+    /** A shop equip the optimizer would equip, paired with the shop slot + price to buy it. */
+    record EquipUpgrade(short shopSlot, int itemId, int price) {}
+
+    /**
+     * Purchase-sequence step (ownerless only): buy gear upgrades the optimizer would actually
+     * wear, then re-run autoEquip so the bot puts them on. Uses
+     * {@link BotEquipManager#findRecommendedEquipsFromItems} as the upgrade oracle — the same
+     * decision autoEquip makes — so we never buy sidegrades or items the bot wouldn't equip.
+     */
+    private static PurchaseSequence buyEquipUpgradesStep(PurchaseSequence sequence, Shop shop) {
+        Character bot = sequence.bot();
+        List<EquipUpgrade> upgrades = findShopEquipUpgrades(bot, shop);
+        if (upgrades.isEmpty()) {
+            return sequence;
+        }
+
+        int freeSlots = bot.getInventory(InventoryType.EQUIP).getNumFreeSlot();
+        List<EquipUpgrade> plan = planEquipUpgradeBuys(upgrades, bot.getMeso(), freeSlots, EQUIP_BUY_MESO_RESERVE);
+
+        int bought = 0;
+        for (EquipUpgrade up : plan) {
+            // Re-check meso each iteration: prior buys in this loop spent some down.
+            if (bot.getMeso() - up.price() < EQUIP_BUY_MESO_RESERVE) {
+                continue;
+            }
+            Shop.TransactionResult result = shop.buyDirect(bot, up.shopSlot(), up.itemId(), (short) 1);
+            if (result == Shop.TransactionResult.SUCCESS) {
+                bought++;
+                sequence.bought().add(resolveItemName(up.itemId(), "gear"));
+            }
+        }
+
+        if (bought > 0) {
+            // Force an equip pass so freshly-bought gear gets worn this visit (the throttle
+            // would otherwise skip the inventory-change-triggered autoEquip).
+            BotEquipManager.autoEquip(bot, null, null, true);
+        }
+        return sequence;
+    }
+
+    /**
+     * Builds the wearable-equip candidates from the shop's stock and asks the optimizer which
+     * ones are real upgrades. Returns each upgrade paired with its shop slot + price. Cheap
+     * pre-filters (meso purchase, level req) keep the candidate set small before the DP runs.
+     */
+    private static List<EquipUpgrade> findShopEquipUpgrades(Character bot, Shop shop) {
+        ItemInformationProvider ii = ItemInformationProvider.getInstance();
+        int level = bot.getLevel();
+
+        // shop slot index -> (candidate Equip, price). Identity-keyed so optimizer picks map back.
+        Map<Equip, EquipUpgrade> byCandidate = new IdentityHashMap<>();
+        List<Equip> candidates = new ArrayList<>();
+        List<ShopItem> items = shop.getItems();
+        for (int i = 0; i < items.size(); i++) {
+            ShopItem si = items.get(i);
+            if (si.getPrice() <= 0) {
+                continue; // bots only do meso purchases
+            }
+            int id = si.getItemId();
+            if (ii.isCash(id) || !ItemConstants.isEquipment(id)) {
+                continue;
+            }
+            // Level gate is the one cheap req we check up front; the optimizer enforces the
+            // full job/stat requirement set (and weapon compatibility) when it scores picks.
+            Integer reqLevel = ii.getEquipLevelReq(id);
+            if (reqLevel != null && reqLevel > level) {
+                continue;
+            }
+            Item built = ii.getEquipById(id);
+            if (!(built instanceof Equip equip)) {
+                continue;
+            }
+            candidates.add(equip);
+            byCandidate.put(equip, new EquipUpgrade((short) i, id, si.getPrice()));
+        }
+        if (candidates.isEmpty()) {
+            return List.of();
+        }
+
+        List<EquipUpgrade> upgrades = new ArrayList<>();
+        for (BotEquipManager.EquipRecommendation rec : BotEquipManager.findRecommendedEquipsFromItems(bot, candidates)) {
+            EquipUpgrade up = byCandidate.get(rec.candidate());
+            if (up != null) {
+                upgrades.add(up);
+            }
+        }
+        return upgrades;
+    }
+
+    /**
+     * Pure buy-planner (unit-tested): given the upgrades the optimizer wants, decide which to
+     * buy under a meso budget, a meso reserve floor, and the free equip-bag slot count. Cheapest
+     * upgrade first so a meso-limited bot still gets as many slots improved as possible. At most
+     * one buy per shop slot (anti-spam: don't re-buy the same equip slot in a single visit).
+     */
+    static List<EquipUpgrade> planEquipUpgradeBuys(List<EquipUpgrade> upgrades, int meso,
+                                                   int freeSlots, int mesoReserve) {
+        List<EquipUpgrade> sorted = new ArrayList<>(upgrades);
+        sorted.sort(Comparator.comparingInt(EquipUpgrade::price));
+
+        Map<Short, EquipUpgrade> perSlot = new LinkedHashMap<>();
+        int remainingMeso = meso;
+        int remainingSlots = freeSlots;
+        for (EquipUpgrade up : sorted) {
+            if (perSlot.containsKey(up.shopSlot())) {
+                continue; // already buying for this slot this visit
+            }
+            if (remainingSlots <= 0) {
+                break; // no bag space for another equip
+            }
+            if (remainingMeso - up.price() < mesoReserve) {
+                continue; // would break the reserve; try a cheaper upgrade
+            }
+            perSlot.put(up.shopSlot(), up);
+            remainingMeso -= up.price();
+            remainingSlots--;
+        }
+        return new ArrayList<>(perSlot.values());
     }
 
     private static String buildShortfallMessage(BuyReport report) {

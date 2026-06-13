@@ -97,6 +97,13 @@ public final class BotLlmConfig {
     // Token budget for one planner decision. A JSON object {"action","reason","params"}
     // is small; ~96 tokens covers a one-line reason plus the structure comfortably.
     public static volatile int plannerMaxTokens = 96;
+    // judge_completion (read->judge->mark->emit loop): a goal must be judged complete
+    // on this many CONSECUTIVE ticks before its GOAL.md status flag is flipped done
+    // (two-tick confirmation guards against a single false-positive judgment).
+    public static volatile int plannerConfirmTicks = 2;
+    // Stuck-detector K: if no goal completes for this many ticks while goals remain
+    // open, signal the Tier-1 planner to review (escape a stubborn false negative).
+    public static volatile int plannerStuckTicks = 5;
     // Directory holding per-bot personality/goal context files (SOUL.md, GOAL.md).
     // Layout: <plannerDataDir>/<botName>/SOUL.md etc.
     public static volatile String plannerDataDir = "bots/agent-data";

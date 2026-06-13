@@ -8,9 +8,12 @@ import server.bots.BotManager;
 import server.bots.llm.BotLlmConfig;
 import server.bots.llm.OllamaClient;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -92,6 +95,42 @@ public final class BotAutonomousPlanner {
     /** botCharId → most-recent full cycle snapshot. Planner thread writes; HTTP thread reads. */
     private static final ConcurrentHashMap<Integer, BrainSnapshot> BRAIN_SNAPSHOTS = new ConcurrentHashMap<>();
 
+    // ---- Goal-completion tracking (two-tick confirm + stuck-detector) -------
+    /** Per-bot harness memory for the judge step. Only touched on the planner executor. */
+    private static final ConcurrentHashMap<Integer, CompletionTracker> TRACKERS = new ConcurrentHashMap<>();
+
+    /**
+     * Tracks consecutive "complete" judgments per goal so the harness only flips a
+     * status flag after {@link BotLlmConfig#plannerConfirmTicks} consecutive ticks
+     * (two-tick confirmation), and counts ticks-without-progress for the stuck-detector.
+     * Deterministic and unit-tested in CompletionTrackerTest.
+     */
+    static final class CompletionTracker {
+        private final Map<String, Integer> consecutive = new HashMap<>();
+        private int ticksSinceProgress = 0;
+
+        /** Record this tick's verdict for one goal. Returns true iff it should flip NOW
+         *  (i.e. just hit the confirm threshold). A non-complete verdict resets its run. */
+        boolean confirm(String goalId, boolean complete) {
+            if (!complete) {
+                consecutive.put(goalId, 0);
+                return false;
+            }
+            int n = consecutive.merge(goalId, 1, Integer::sum);
+            if (n >= Math.max(1, BotLlmConfig.plannerConfirmTicks)) {
+                consecutive.put(goalId, 0);  // reset so a still-open goal doesn't re-fire
+                return true;
+            }
+            return false;
+        }
+
+        /** A flip happened this tick — reset the stuck counter. */
+        void onProgress() { ticksSinceProgress = 0; }
+
+        /** No flip this tick — advance and return ticks-without-progress. */
+        int tickNoProgress() { return ++ticksSinceProgress; }
+    }
+
     /**
      * Returns the most-recent {@link BrainSnapshot} for {@code botId}, or {@code null} if
      * no cycle has completed yet. Safe to call from any thread.
@@ -145,6 +184,7 @@ public final class BotAutonomousPlanner {
         INFLIGHT.remove(id);
         DECISIONS.remove(id);
         BRAIN_SNAPSHOTS.remove(id);
+        TRACKERS.remove(id);
     }
 
     /**
@@ -252,8 +292,18 @@ public final class BotAutonomousPlanner {
         Character bot = entry.getBot();
         String botName = bot.getName();
 
+        // step 1 — read GOAL.md + state.
         String soul = ContextFileLoader.loadSoul(botName);
         String goal = ContextFileLoader.loadGoal(botName);
+        log.info("[LOOP] step=read bot={} openGoals={}", botName,
+                (int) GoalChecklist.parse(goal).stream().filter(g -> "open".equals(g.status())).count());
+
+        // steps 2-3 — judge which OPEN goals are complete; flip two-tick-confirmed ones.
+        // Re-read the goal afterward so the emit prompt reflects any flip from this tick.
+        judgeAndMark(entry, botName, goal);
+        goal = ContextFileLoader.loadGoal(botName);
+
+        // step 4 — emit a task for the current state.
         String system = PlannerPromptBuilder.buildSystem(entry, soul);
         // Capture the situation text separately (it's embedded inside prompt, but surface it
         // explicitly so the brain view can show it without re-parsing the full prompt).
@@ -292,6 +342,7 @@ public final class BotAutonomousPlanner {
 
         log.info("planner[{}] decision={} reason=\"{}\" ({}ms)",
                 botName, decision.action, decision.reason, elapsed);
+        log.info("[LOOP] step=emit bot={} action={}", botName, decision.action);
         recordDecision(bot.getId(), decision.action.name(), decision.reason);
 
         // Capture the full brain snapshot for the debug panel. nextRunEpochMs is the
@@ -314,14 +365,50 @@ public final class BotAutonomousPlanner {
         ));
 
         apply(entry, decision);
+        // NOTE: completion is no longer read off the emit call's "done" field — the
+        // separate judge_completion step (judgeAndMark, above) owns status flips now.
+    }
 
-        // The SLM only *reports* which checklist items are done; we do the safe edit
-        // (flip the box, leave the goal text untouched).
-        if (decision.done != null && decision.done.length > 0) {
-            int checked = GoalChecklist.markDone(botName, decision.done);
-            if (checked > 0) {
-                log.info("planner[{}] checked off {} goal checklist item(s)", botName, checked);
+    /**
+     * Steps 2-3 of the loop: ask the SLM which OPEN goals are complete, and flip the
+     * GOAL.md status flag for any goal confirmed complete on {@code plannerConfirmTicks}
+     * consecutive ticks (two-tick confirmation). The harness owns sequencing and the
+     * single safe edit; the SLM only judges. Emits {@code [LOOP]} markers throughout.
+     */
+    private static void judgeAndMark(BotEntry entry, String botName, String goal) {
+        List<GoalChecklist.Goal> open = GoalChecklist.parse(goal).stream()
+                .filter(g -> "open".equals(g.status()))
+                .toList();
+        if (open.isEmpty()) {
+            return;  // nothing open to judge (all-done -> Tier-1 escalation is Phase 4)
+        }
+        CompletionTracker tracker = TRACKERS.computeIfAbsent(entry.getBot().getId(), k -> new CompletionTracker());
+
+        List<PlannerJudge.CompletionVerdict> verdicts = PlannerJudge.judge(entry, open);
+        Map<String, PlannerJudge.CompletionVerdict> byId = new HashMap<>();
+        for (PlannerJudge.CompletionVerdict v : verdicts) byId.put(v.goalId(), v);
+
+        boolean flipped = false;
+        String nowIso = Instant.now().toString();
+        for (GoalChecklist.Goal g : open) {
+            PlannerJudge.CompletionVerdict v = byId.get(g.id());
+            boolean complete = v != null && v.complete();
+            if (tracker.confirm(g.id(), complete)) {                 // two-tick confirmed
+                String ev = v != null ? v.evidence() : "";
+                if (GoalChecklist.markComplete(botName, g.id(), ev, nowIso)) {
+                    log.info("[LOOP] step=mark bot={} goal={} complete=true evidence=\"{}\"", botName, g.id(), ev);
+                    flipped = true;
+                }
             }
+        }
+
+        if (flipped) {
+            tracker.onProgress();
+        } else if (tracker.tickNoProgress() >= Math.max(1, BotLlmConfig.plannerStuckTicks)) {
+            // Stuck: completion set unchanged for K ticks while goals remain open.
+            log.info("[LOOP] step=stuck bot={} signal=planner open={} reason=\"no completion progress in {} ticks\"",
+                    botName, open.size(), BotLlmConfig.plannerStuckTicks);
+            tracker.onProgress();  // re-arm: signal once every K ticks, not every tick
         }
     }
 

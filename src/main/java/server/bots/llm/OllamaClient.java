@@ -26,7 +26,7 @@ public final class OllamaClient {
     private OllamaClient() {}
 
     public static Optional<String> generate(String prompt, String system) {
-        return send(prompt, system, BotLlmConfig.maxPredictTokens, BotLlmConfig.requestTimeoutMs);
+        return send(prompt, system, BotLlmConfig.maxPredictTokens, BotLlmConfig.requestTimeoutMs, false);
     }
 
     /** Variant for non-chat calls (e.g. memory summarization) where we want a bigger
@@ -34,11 +34,19 @@ public final class OllamaClient {
     public static Optional<String> generateLong(String prompt, String system, int numPredict) {
         // Rough scale: small CPU produces ~10 tok/s, so allow numPredict*200ms + base.
         int timeoutMs = Math.max(BotLlmConfig.requestTimeoutMs, 5000 + numPredict * 200);
-        return send(prompt, system, numPredict, timeoutMs);
+        return send(prompt, system, numPredict, timeoutMs, false);
     }
 
-    private static Optional<String> send(String prompt, String system, int numPredict, int timeoutMs) {
-        String body = buildBody(prompt, system, numPredict);
+    /** Constrained-JSON variant: tells Ollama {@code "format":"json"} so the model
+     *  emits valid JSON only (no prose). More reliable than free-form at 1-3B —
+     *  used by the planner's judge_completion / emit_task structured calls. */
+    public static Optional<String> generateJson(String prompt, String system, int numPredict) {
+        int timeoutMs = Math.max(BotLlmConfig.requestTimeoutMs, 5000 + numPredict * 200);
+        return send(prompt, system, numPredict, timeoutMs, true);
+    }
+
+    private static Optional<String> send(String prompt, String system, int numPredict, int timeoutMs, boolean formatJson) {
+        String body = buildBody(prompt, system, numPredict, formatJson);
         HttpRequest req;
         try {
             req = HttpRequest.newBuilder(URI.create(BotLlmConfig.endpoint + "/api/generate"))
@@ -68,11 +76,14 @@ public final class OllamaClient {
         }
     }
 
-    private static String buildBody(String prompt, String system, int numPredict) {
+    private static String buildBody(String prompt, String system, int numPredict, boolean formatJson) {
         StringBuilder sb = new StringBuilder(384);
         sb.append('{');
         sb.append("\"model\":\"").append(jsonEscape(BotLlmConfig.model)).append("\",");
         sb.append("\"stream\":false,");
+        if (formatJson) {
+            sb.append("\"format\":\"json\",");
+        }
         if (BotLlmConfig.keepAlive != null && !BotLlmConfig.keepAlive.isBlank()) {
             sb.append("\"keep_alive\":\"").append(jsonEscape(BotLlmConfig.keepAlive)).append("\",");
         }

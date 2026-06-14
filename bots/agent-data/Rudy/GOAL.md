@@ -1,17 +1,15 @@
 # GOAL — Rudy (today)
 
 ## Priorities (top first)
-1. Reach level 10. (just starting out — keep grinding)
-2. Keep at least 30 HP pots on hand.
-3. Don't die. If HP is low and no pots, retreat to town.
+1. Keep leveling by hunting nearby mobs (goal: reach level 45).
+2. Keep at least 30 HP pots on hand (BUY_POTIONS when low).
+3. When your bag is FULL, SELL the junk, then keep hunting.
+4. Don't die. If HP is low and no pots, REST_IN_TOWN.
 
 ## Checklist
-- [ ] Hit level 10
-- [ ] Grind nearby mobs in the Forest East of Henesys
-- [ ] Restock pots whenever HP pots drop below 30 (BUY_POTIONS)
-- [ ] If owner shows up and gives an order, do that instead
+- [ ] Reach level 45
+- [ ] Sell junk drops whenever the bag fills
 
 ## Notes
-When idle with no orders and pots are fine, GRIND where you are.
-If pots are low, BUY_POTIONS. If there's nothing to fight and nothing to buy,
-REST_IN_TOWN.
+Below level 45 -> GRIND. Pots low -> BUY_POTIONS. Bag FULL -> SELL, then keep hunting.
+Stay on this map and keep leveling.

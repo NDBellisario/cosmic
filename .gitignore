@@ -36,4 +36,8 @@ models/
 # LLM bot chat memory (per-bot plain-text JSONL + summaries)
 bots/llm-memory/
 
+# Planner GOAL.md atomic-write + Tier-1 backup artifacts (runtime only)
+bots/agent-data/**/*.tmp
+bots/agent-data/**/*.bak
+
 nul

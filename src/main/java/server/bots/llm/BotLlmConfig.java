@@ -111,6 +111,29 @@ public final class BotLlmConfig {
     // Directory holding per-bot personality/goal context files (SOUL.md, GOAL.md).
     // Layout: <plannerDataDir>/<botName>/SOUL.md etc.
     public static volatile String plannerDataDir = "bots/agent-data";
+
+    // ---- Tier-1 orchestrator (Claude-backed GOAL.md authoring) ----
+    // Master switch. OFF by default: Tier-1 calls the PAID Anthropic API, so it must be
+    // explicitly enabled. When off, the escalate/stuck signals stay log-only (as before).
+    // The API key is read from the ANTHROPIC_API_KEY env var, never stored here.
+    public static volatile boolean tier1Enabled = false;
+    // Anthropic Messages API base URL + model for the goal-authoring call.
+    public static volatile String anthropicEndpoint = "https://api.anthropic.com";
+    public static volatile String tier1Model = "claude-sonnet-4-6";
+    // Token budget for one authored GOAL.md (markdown + adaptive thinking). 4096 keeps the
+    // call non-streamed and well clear of HTTP-timeout territory.
+    public static volatile int tier1MaxTokens = 4096;
+    // Opus authoring with adaptive thinking can take 10-30s; give it room.
+    public static volatile int tier1TimeoutMs = 60_000;
+    // Per-bot cooldown: minimum ms between Tier-1 re-authors for ONE bot. The stuck-detector
+    // re-fires every K ticks, so a permanently-stuck bot would otherwise re-trigger a PAID
+    // Claude call every ~40s. This caps it to one call per window per bot (applies to both
+    // the auto escalate/stuck signals AND the manual panel trigger). 10 min default.
+    public static volatile int tier1MinIntervalMs = 600_000;
+    // External world-index grounding harness (Python + SQLite). The server runs from
+    // cosmic/, the harness is a sibling dir, so the default is one level up.
+    public static volatile String worldIndexDir = "../world-index";
+    public static volatile String worldIndexPython = "python3";
     // Directory holding swappable global system-prompt templates for the planner.
     // active.txt names the active template (basename); <name>.md is the template,
     // <name>.fewshot.md an optional few-shot fragment. When no active template is

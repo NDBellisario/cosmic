@@ -197,6 +197,7 @@ public final class BotAutonomousPlanner {
         DECISIONS.remove(id);
         BRAIN_SNAPSHOTS.remove(id);
         TRACKERS.remove(id);
+        Tier1Orchestrator.unregister(id);
     }
 
     /**
@@ -209,6 +210,29 @@ public final class BotAutonomousPlanner {
         if (!BotLlmConfig.plannerEnabled || entry == null || entry.getBot() == null) return;
         if (!REGISTERED.containsKey(entry.getBot().getId())) return;
         submit(entry, eventReason);
+    }
+
+    /**
+     * Panel hook: force a Tier-1 GOAL.md re-author for a registered bot by id.
+     * Returns false if the bot isn't registered. The actual Claude call runs off-thread
+     * (and is gated by tier1Enabled + an api key inside {@link Tier1Orchestrator#escalate}).
+     */
+    public static boolean forceReauthor(int botId, String reason) {
+        BotEntry entry = REGISTERED.get(botId);
+        if (entry == null) return false;
+        Tier1Orchestrator.escalate(entry, reason != null ? reason : "manual");
+        return true;
+    }
+
+    /**
+     * Panel hook: force an immediate Tier-2 (SLM) decision for a registered bot by id,
+     * bypassing the interval. Returns false if the bot isn't registered.
+     */
+    public static boolean forceDecision(int botId, String reason) {
+        BotEntry entry = REGISTERED.get(botId);
+        if (entry == null) return false;
+        triggerNow(entry, reason != null ? reason : "manual");
+        return true;
     }
 
     private static void ensureStarted() {
@@ -399,6 +423,7 @@ public final class BotAutonomousPlanner {
             if (!all.isEmpty() && tracker.markEscalatedOnce()) {
                 log.info("[LOOP] step=escalate bot={} signal=planner reason=\"all {} goals complete, awaiting next GOAL.md\"",
                         botName, all.size());
+                Tier1Orchestrator.escalate(entry, "all " + all.size() + " goals complete — author the next stretch");
             }
             return;
         }
@@ -428,6 +453,8 @@ public final class BotAutonomousPlanner {
             // Stuck: completion set unchanged for K ticks while goals remain open.
             log.info("[LOOP] step=stuck bot={} signal=planner open={} reason=\"no completion progress in {} ticks\"",
                     botName, open.size(), BotLlmConfig.plannerStuckTicks);
+            Tier1Orchestrator.escalate(entry, "stuck: no completion progress in "
+                    + BotLlmConfig.plannerStuckTicks + " ticks — review and rewrite to unstick");
             tracker.onProgress();  // re-arm: signal once every K ticks, not every tick
         }
     }

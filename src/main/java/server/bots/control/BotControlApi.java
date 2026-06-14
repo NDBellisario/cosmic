@@ -5,8 +5,10 @@ import com.sun.net.httpserver.HttpServer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import server.bots.BotManager;
+import server.bots.llm.AnthropicClient;
 import server.bots.llm.BotLlmConfig;
 import server.bots.planner.BotAutonomousPlanner;
+import server.bots.planner.Tier1Orchestrator;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -21,6 +23,13 @@ import java.util.concurrent.Executors;
  *
  * Endpoints (contract is fixed — the panel's bots.ts proxy depends on it):
  *   GET  /health
+ *   GET  /config                 Tier-1 (Claude GOAL.md authoring) settings + apiKeyPresent
+ *   POST /config                 body: any subset of {tier1Enabled,tier1Model,anthropicEndpoint,tier1MaxTokens,tier1MinIntervalMs,worldIndexDir}
+ *   GET  /tier1/prompt           current Tier-1 system prompt (editable file or built-in)
+ *   PUT  /tier1/prompt           body: {"content":"..."} — edit the Tier-1 system prompt (blank reverts to built-in)
+ *   POST /bots/{id}/tier1/reauthor   force a Tier-1 GOAL.md re-author now
+ *   GET  /bots/{id}/tier1/events     per-bot Tier-1 authoring history (reason/result/latency)
+ *   POST /bots/{id}/decide       force an immediate Tier-2 (SLM) decision
  *   GET  /bots
  *   POST /bots/spawn          body: {"name":"...","mapId":optional-int}
  *   POST /bots/{id}/despawn
@@ -41,6 +50,8 @@ public final class BotControlApi {
         try {
             HttpServer s = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 16);
             s.createContext("/health",         BotControlApi::handleHealth);
+            s.createContext("/config",         BotControlApi::handleConfig);
+            s.createContext("/tier1",          BotControlApi::handleTier1);
             s.createContext("/bots/spawn",     BotControlApi::handleSpawn);
             s.createContext("/bots",           BotControlApi::handleBots);
             s.createContext("/maps",           BotControlApi::handleMaps);
@@ -93,6 +104,56 @@ public final class BotControlApi {
     }
 
     /**
+     * GET  /config → current Tier-1 (Claude-backed GOAL.md authoring) settings.
+     * POST /config → apply any subset of the mutable fields, then return the new state.
+     * The Anthropic API key is never read or written here — only its presence is
+     * reported (apiKeyPresent), sourced from the ANTHROPIC_API_KEY env var.
+     */
+    private static void handleConfig(HttpExchange ex) throws IOException {
+        if (!checkAuth(ex)) return;
+        String method = ex.getRequestMethod().toUpperCase();
+        if ("GET".equals(method)) {
+            send(ex, 200, configJson());
+            return;
+        }
+        if (!"POST".equals(method)) {
+            send(ex, 405, "{\"ok\":false,\"error\":\"method not allowed\"}");
+            return;
+        }
+        String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+        Boolean enabled = extractBooleanField(body, "tier1Enabled");
+        if (enabled != null) BotLlmConfig.tier1Enabled = enabled;
+        String model = extractStringField(body, "tier1Model");
+        if (model != null && !model.isBlank()) BotLlmConfig.tier1Model = model;
+        String endpoint = extractStringField(body, "anthropicEndpoint");
+        if (endpoint != null && !endpoint.isBlank()) BotLlmConfig.anthropicEndpoint = endpoint;
+        Integer maxTokens = extractIntField(body, "tier1MaxTokens");
+        if (maxTokens != null && maxTokens > 0) BotLlmConfig.tier1MaxTokens = maxTokens;
+        Integer minInterval = extractIntField(body, "tier1MinIntervalMs");
+        if (minInterval != null && minInterval >= 0) BotLlmConfig.tier1MinIntervalMs = minInterval;
+        String worldIndexDir = extractStringField(body, "worldIndexDir");
+        if (worldIndexDir != null && !worldIndexDir.isBlank()) BotLlmConfig.worldIndexDir = worldIndexDir;
+        log.info("bot control API: tier-1 config updated (enabled={}, model={})",
+                BotLlmConfig.tier1Enabled, BotLlmConfig.tier1Model);
+        send(ex, 200, configJson());
+    }
+
+    /** Serialize the live Tier-1 config (+ read-only apiKeyPresent) — shared by GET and POST. */
+    private static String configJson() {
+        StringBuilder sb = new StringBuilder(256);
+        sb.append("{\"ok\":true");
+        sb.append(",\"tier1Enabled\":").append(BotLlmConfig.tier1Enabled);
+        sb.append(",\"tier1Model\":\"").append(jsonEscape(BotLlmConfig.tier1Model)).append("\"");
+        sb.append(",\"anthropicEndpoint\":\"").append(jsonEscape(BotLlmConfig.anthropicEndpoint)).append("\"");
+        sb.append(",\"tier1MaxTokens\":").append(BotLlmConfig.tier1MaxTokens);
+        sb.append(",\"tier1MinIntervalMs\":").append(BotLlmConfig.tier1MinIntervalMs);
+        sb.append(",\"worldIndexDir\":\"").append(jsonEscape(BotLlmConfig.worldIndexDir)).append("\"");
+        sb.append(",\"apiKeyPresent\":").append(AnthropicClient.isConfigured());
+        sb.append("}");
+        return sb.toString();
+    }
+
+    /**
      * Routes /bots/* requests.
      * The HttpServer context "/bots" matches everything under /bots (and /bots itself).
      * We further dispatch by method + path here.
@@ -119,9 +180,94 @@ public final class BotControlApi {
         } else if ("POST".equals(method) && path.matches("/bots/\\d+/move")) {
             int id = extractIdFromPath(path, 1);
             handleMove(ex, id);
+        } else if ("POST".equals(method) && path.matches("/bots/\\d+/tier1/reauthor")) {
+            handleReauthor(ex, extractIdFromPath(path, 2));
+        } else if ("GET".equals(method) && path.matches("/bots/\\d+/tier1/events")) {
+            handleTier1Events(ex, extractIdFromPath(path, 2));
+        } else if ("POST".equals(method) && path.matches("/bots/\\d+/decide")) {
+            handleForceDecide(ex, extractIdFromPath(path, 1));
         } else {
             send(ex, 404, "{\"ok\":false,\"error\":\"not found\"}");
         }
+    }
+
+    /**
+     * GET  /tier1/prompt → {"ok":true,"source":"file|builtin","prompt":"<text>"}
+     * PUT  /tier1/prompt   body {"content":"..."} — overwrite the editable Tier-1 system
+     *      prompt (blank content reverts to the built-in). Returns the new state.
+     */
+    private static void handleTier1(HttpExchange ex) throws IOException {
+        if (!checkAuth(ex)) return;
+        String method = ex.getRequestMethod().toUpperCase();
+        String path = ex.getRequestURI().getPath();
+        if (path.endsWith("/") && path.length() > 1) path = path.substring(0, path.length() - 1);
+        if (!"/tier1/prompt".equals(path)) {
+            send(ex, 404, "{\"ok\":false,\"error\":\"not found\"}");
+            return;
+        }
+        if ("PUT".equals(method)) {
+            String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            String content = extractStringField(body, "content");
+            if (content == null) {
+                send(ex, 400, "{\"ok\":false,\"error\":\"body must include {\\\"content\\\":\\\"...\\\"}\"}");
+                return;
+            }
+            Tier1Orchestrator.writeSystemPrompt(content);
+            log.info("bot control API: tier-1 system prompt updated ({} chars)", content.length());
+            send(ex, 200, tier1PromptJson());
+        } else if ("GET".equals(method)) {
+            send(ex, 200, tier1PromptJson());
+        } else {
+            send(ex, 405, "{\"ok\":false,\"error\":\"method not allowed\"}");
+        }
+    }
+
+    private static String tier1PromptJson() {
+        return "{\"ok\":true,\"source\":\"" + jsonEscape(Tier1Orchestrator.systemPromptSource())
+                + "\",\"prompt\":\"" + jsonEscape(Tier1Orchestrator.systemPrompt()) + "\"}";
+    }
+
+    /** POST /bots/{id}/tier1/reauthor — force a Tier-1 GOAL.md re-author for a running bot. */
+    private static void handleReauthor(HttpExchange ex, int botCharId) throws IOException {
+        boolean ok = BotAutonomousPlanner.forceReauthor(botCharId, "manual re-author (panel)");
+        if (!ok) { send(ex, 404, "{\"ok\":false,\"error\":\"bot not registered\"}"); return; }
+        send(ex, 200, "{\"ok\":true,\"queued\":true}");
+    }
+
+    /** POST /bots/{id}/decide — force an immediate Tier-2 (SLM) decision for a running bot. */
+    private static void handleForceDecide(HttpExchange ex, int botCharId) throws IOException {
+        boolean ok = BotAutonomousPlanner.forceDecision(botCharId, "manual decision (panel)");
+        if (!ok) { send(ex, 404, "{\"ok\":false,\"error\":\"bot not registered\"}"); return; }
+        send(ex, 200, "{\"ok\":true,\"queued\":true}");
+    }
+
+    /** GET /bots/{id}/tier1/events?limit=N → [{ts,reason,result,openGoals,latencyMs,model}, ...] newest-last */
+    private static void handleTier1Events(HttpExchange ex, int botCharId) throws IOException {
+        int limit = 20;
+        String query = ex.getRequestURI().getQuery();
+        if (query != null) {
+            for (String param : query.split("&")) {
+                if (param.startsWith("limit=")) {
+                    try { limit = Integer.parseInt(param.substring(6)); } catch (NumberFormatException ignored) {}
+                }
+            }
+        }
+        limit = Math.max(1, Math.min(limit, 100));
+        List<Tier1Orchestrator.Tier1Event> events = Tier1Orchestrator.recentEvents(botCharId, limit);
+        StringBuilder sb = new StringBuilder(events.size() * 96 + 2);
+        sb.append('[');
+        for (int i = 0; i < events.size(); i++) {
+            if (i > 0) sb.append(',');
+            Tier1Orchestrator.Tier1Event e = events.get(i);
+            sb.append("{\"ts\":").append(e.epochMs());
+            sb.append(",\"reason\":\"").append(jsonEscape(e.reason())).append("\"");
+            sb.append(",\"result\":\"").append(jsonEscape(e.result())).append("\"");
+            sb.append(",\"openGoals\":").append(e.openGoals());
+            sb.append(",\"latencyMs\":").append(e.latencyMs());
+            sb.append(",\"model\":\"").append(jsonEscape(e.model())).append("\"}");
+        }
+        sb.append(']');
+        send(ex, 200, sb.toString());
     }
 
     /** GET /maps/{mapId}/mobs → [{x,y,name}, ...] live monster positions for the mini-map. */
@@ -379,6 +525,21 @@ public final class BotControlApi {
         while (i < json.length() && (Character.isDigit(json.charAt(i)) || json.charAt(i) == '-')) i++;
         if (i == start) return null;
         try { return Integer.parseInt(json.substring(start, i)); } catch (NumberFormatException e) { return null; }
+    }
+
+    /** Extract a boolean field value from a JSON string, or null if absent/unparseable. */
+    private static Boolean extractBooleanField(String json, String key) {
+        if (json == null) return null;
+        String needle = "\"" + key + "\"";
+        int k = json.indexOf(needle);
+        if (k < 0) return null;
+        int colon = json.indexOf(':', k + needle.length());
+        if (colon < 0) return null;
+        int i = colon + 1;
+        while (i < json.length() && Character.isWhitespace(json.charAt(i))) i++;
+        if (json.startsWith("true", i)) return Boolean.TRUE;
+        if (json.startsWith("false", i)) return Boolean.FALSE;
+        return null;
     }
 
     /** JSON-escape a string value (mirrors OllamaClient.jsonEscape). */

@@ -1868,6 +1868,11 @@ public class BotManager {
             BotMovementManager.broadcastMovement(entry);
         }
 
+        // Resting recovery: ownerless bots aren't in the normal player natural-regen
+        // loop, so an idle/parked bot's HP/MP never recovers on its own. Heal a slice
+        // while idle (i.e. resting in town, not grinding/following) until full.
+        maybeRestRegen(entry, bot, nowMs);
+
         BotOfferManager.expirePendingOffer(entry);
         boolean runAiTick = consumeAiTick(entry);
         entry.lastTickWasAi = runAiTick;
@@ -3036,6 +3041,39 @@ public class BotManager {
         clearScriptTasks(entry);
         enterOwnerInactiveSafeMode(entry, entry.bot, entry.owner.getId(),
                 shouldTownWarpForOwnerInactive(entry));
+    }
+
+    /** How often a resting ownerless bot regenerates, and the fraction of max HP/MP per tick. */
+    private static final long REST_REGEN_INTERVAL_MS = 1500L;
+    private static final double REST_REGEN_FRACTION = 0.06;   // ~full in ~25s
+
+    /**
+     * Natural HP/MP recovery for an idle ownerless bot ("resting"). Ownerless bots have
+     * no client and aren't driven by the normal player recovery loop, so a parked bot
+     * would sit at low HP forever (the REST_IN_TOWN no-op). Only heals when the bot is
+     * genuinely idle (no grind/follow/owner mode) so it never heals mid-combat. No-op
+     * once full. Positive deltas never trip autopot (that's gated on stat loss).
+     */
+    private void maybeRestRegen(BotEntry entry, Character bot, long nowMs) {
+        if (!entry.isOwnerless() || !entry.isIdleForPlanner()) {
+            return;
+        }
+        if (nowMs - entry.lastRestRegenMs < REST_REGEN_INTERVAL_MS) {
+            return;
+        }
+        int maxHp = bot.getCurrentMaxHp();
+        int maxMp = bot.getCurrentMaxMp();
+        int hp = bot.getHp();
+        int mp = bot.getMp();
+        if (hp >= maxHp && mp >= maxMp) {
+            return;
+        }
+        entry.lastRestRegenMs = nowMs;
+        int healHp = Math.min(maxHp - hp, Math.max(1, (int) Math.ceil(maxHp * REST_REGEN_FRACTION)));
+        int healMp = Math.min(maxMp - mp, Math.max(1, (int) Math.ceil(maxMp * REST_REGEN_FRACTION)));
+        if (healHp > 0 || healMp > 0) {
+            bot.addMPHPAndTriggerAutopot(Math.max(0, healHp), Math.max(0, healMp));
+        }
     }
 
     /**

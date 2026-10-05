@@ -339,6 +339,7 @@ public class BotEntry {
     boolean lastTickWasAi = false;
     long lastTickAtMs = 0L;
     long lastHeartbeatAtMs = 0L;
+    long lastRestRegenMs = 0L;
     long nextFollowIdleMovementCheckAtMs = 0L;
     int tickFailureCount = 0;
     long tickFailureWindowStartedAtMs = 0L;

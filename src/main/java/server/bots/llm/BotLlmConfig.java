@@ -33,7 +33,9 @@ public final class BotLlmConfig {
     // Hard cap on tokens generated. Reply is split across up to
     // maxReplyMessages chat messages of maxReplyCharsPerMessage chars each,
     // so size this to roughly cover the multi-message budget plus a bit.
-    public static volatile int maxPredictTokens = 24;
+    // 2*120=240 chars ~= 60 tokens; 24 was truncating replies to ~1/3 of the
+    // intended length (a big part of why chat read as "too basic").
+    public static volatile int maxPredictTokens = 60;
 
     // Context window size. Our prompts stay under ~300 tokens; the default
     // 4096 wastes memory bandwidth. Lower = faster on CPU.

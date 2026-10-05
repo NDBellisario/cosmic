@@ -3,6 +3,7 @@ package server.bots.llm;
 import client.Character;
 import server.bots.BotEntry;
 import server.bots.planner.ContextFileLoader;
+import server.bots.planner.GoalChecklist;
 
 import java.util.List;
 
@@ -10,9 +11,12 @@ public final class PromptBuilder {
     private PromptBuilder() {}
 
     /** Max SOUL chars to weave into the chat system prompt. Chat runs on a tight
-     *  budget (numCtx 2048, maxPredictTokens 24), so we cap the persona to avoid
-     *  crowding out the conversation. */
-    private static final int SOUL_CHAR_CAP = 400;
+     *  numCtx (2048) budget, so we cap the persona to avoid crowding the conversation. */
+    private static final int SOUL_CHAR_CAP = 550;
+
+    /** Max chars of the bot's current GOAL.md objectives to surface in chat, so it can
+     *  answer "what are you up to?" from its real plan without reciting a checklist. */
+    private static final int GOAL_CHAR_CAP = 240;
 
     public static String buildSystem(BotEntry entry, SenderRelation relation, String senderName) {
         Character bot = entry.getBot();
@@ -26,16 +30,43 @@ public final class PromptBuilder {
             case STRANGER -> "You are talking to " + senderName + ", a stranger you just met in the game.";
         };
 
-        String personaLine = (bot != null) ? buildPersonaLine(bot.getName()) : "";
+        String personaLine = (bot != null) ? buildPersonaLine(botName) : "";
+        String goalLine = (bot != null) ? buildGoalLine(botName) : "";
 
         return "Your IGN is " + botName + ". "
                 + "You are a real human MapleStory player, level " + lvl + " " + job + ". "
                 + personaLine
-                + "Talk like mmo chatter: lowercase, 1 short sentence, abbreviate whenever possible, text only, use internet slang when applicable, no emoji, no speaker label. "
-                + "Keep replies simple. Prefer fragments over full grammar. "
+                + goalLine
+                + "Talk like mmo chatter: lowercase, usually 1 (at most 2) short sentences, abbreviate when natural, text only, internet slang when it fits, no emoji, no speaker label. "
+                + "Let your personality and what you're doing show through. "
                 + "Answer only the latest message directly. If unsure, say so briefly instead of guessing. "
                 + "Never say you are an ai, assistant, chatbot, or bot. "
                 + relationLine;
+    }
+
+    /** Builds a "what you're currently doing" line from the bot's OPEN GOAL.md goals,
+     *  or "" if none. Lets the bot talk about its real objectives in chat. */
+    private static String buildGoalLine(String botName) {
+        String goalMd;
+        try {
+            goalMd = ContextFileLoader.loadGoal(botName);
+        } catch (RuntimeException e) {
+            return "";
+        }
+        if (goalMd == null || goalMd.isBlank()) {
+            return "";
+        }
+        List<String> open = GoalChecklist.openGoalTexts(goalMd);
+        if (open.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder("What you're working on right now: ");
+        for (int i = 0; i < open.size() && sb.length() < GOAL_CHAR_CAP; i++) {
+            if (i > 0) sb.append("; ");
+            sb.append(open.get(i).strip());
+        }
+        sb.append(". Mention this naturally if asked what you're up to — don't recite the list. ");
+        return sb.toString();
     }
 
     /** Builds a trimmed "who you are" line from the bot's SOUL.md, or "" if absent.

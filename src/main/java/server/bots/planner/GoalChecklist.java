@@ -120,6 +120,19 @@ public final class GoalChecklist {
         }
     }
 
+    /**
+     * Texts of the OPEN goals in a GOAL.md body, in order. Public so the chat LLM
+     * ({@code PromptBuilder}) can surface what the bot is currently working on without
+     * exposing the package-private {@link Goal} record.
+     */
+    public static List<String> openGoalTexts(String goal) {
+        List<String> out = new ArrayList<>();
+        for (Goal g : parse(goal)) {
+            if ("open".equals(g.status())) out.add(g.text());
+        }
+        return out;
+    }
+
     /** Parse the checklist items (in order) out of a GOAL.md body. */
     static List<Item> items(String goal) {
         List<Item> out = new ArrayList<>();

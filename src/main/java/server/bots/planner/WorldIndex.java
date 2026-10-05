@@ -23,10 +23,23 @@ import java.util.concurrent.TimeUnit;
  * grounding tables rather than failing. Never throws. The default text (tab-aligned)
  * output is fed straight into the prompt; Claude reads the tables fine, so no parsing.
  */
-final class WorldIndex {
+public final class WorldIndex {
     private static final Logger log = LoggerFactory.getLogger(WorldIndex.class);
 
     private WorldIndex() {}
+
+    /**
+     * Run an arbitrary query.py subcommand and return its raw {@code --json} stdout
+     * (or {@code ""} on any failure). Used by the debug-panel control API to proxy
+     * world-index browsing straight to the front-end.
+     */
+    public static String queryJson(String subcommand, String... args) {
+        List<String> cmd = new ArrayList<>(args.length + 2);
+        cmd.add(subcommand);
+        for (String a : args) cmd.add(a);
+        cmd.add("--json");
+        return run(cmd);
+    }
 
     /** Ranked grind spots for a level band. */
     static String grind(int min, int max) {

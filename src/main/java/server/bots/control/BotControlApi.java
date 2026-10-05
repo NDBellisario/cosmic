@@ -9,13 +9,42 @@ import server.bots.llm.AnthropicClient;
 import server.bots.llm.BotLlmConfig;
 import server.bots.planner.BotAutonomousPlanner;
 import server.bots.planner.Tier1Orchestrator;
+import server.bots.planner.WorldIndex;
+
+import client.Character;
+import client.Client;
+import client.inventory.Equip;
+import client.inventory.Inventory;
+import client.inventory.InventoryType;
+import client.inventory.Item;
+import client.inventory.ItemFactory;
+import client.inventory.manipulator.InventoryManipulator;
+import constants.inventory.ItemConstants;
+import net.server.PlayerStorage;
+import net.server.Server;
+import net.server.channel.Channel;
+import net.server.world.World;
+import server.ItemInformationProvider;
+import server.TimerManager;
+import tools.DatabaseConnection;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Lightweight HTTP control API for the debug panel.
@@ -55,6 +84,8 @@ public final class BotControlApi {
             s.createContext("/bots/spawn",     BotControlApi::handleSpawn);
             s.createContext("/bots",           BotControlApi::handleBots);
             s.createContext("/maps",           BotControlApi::handleMaps);
+            s.createContext("/worldindex",     BotControlApi::handleWorldIndex);
+            s.createContext("/characters",     BotControlApi::handleCharacters);
             // Single-threaded executor: all requests are brief reads + game-thread submits.
             s.setExecutor(Executors.newSingleThreadExecutor(r -> {
                 Thread t = new Thread(r, "bot-control-api");
@@ -431,6 +462,420 @@ public final class BotControlApi {
     }
 
     // -------------------------------------------------------------------------
+    // World-index browsing (GET only) — proxies query.py --json straight through.
+    // -------------------------------------------------------------------------
+
+    /**
+     * GET /worldindex/{maps|mobs|mob-locations|spawns|items|gear|sources}
+     * Returns the raw JSON produced by world-index/query.py (or "[]" if empty).
+     */
+    private static void handleWorldIndex(HttpExchange ex) throws IOException {
+        if (!checkAuth(ex)) return;
+        if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
+            send(ex, 405, "{\"ok\":false,\"error\":\"method not allowed\"}");
+            return;
+        }
+        String path = ex.getRequestURI().getPath();
+        if (path.endsWith("/") && path.length() > 1) path = path.substring(0, path.length() - 1);
+        Map<String, String> q = parseQuery(ex.getRequestURI().getQuery());
+
+        String json;
+        switch (path) {
+            case "/worldindex/maps"          -> json = WorldIndex.queryJson("map", q.getOrDefault("q", ""));
+            case "/worldindex/mobs"          -> json = WorldIndex.queryJson("mob", q.getOrDefault("q", ""));
+            case "/worldindex/mob-locations" -> json = WorldIndex.queryJson("mobmaps", q.getOrDefault("q", ""));
+            case "/worldindex/spawns"        -> json = WorldIndex.queryJson("spawns", q.getOrDefault("mapId", ""));
+            case "/worldindex/items"         -> json = WorldIndex.queryJson("equip", q.getOrDefault("q", ""));
+            case "/worldindex/sources"       -> json = WorldIndex.queryJson("sources", q.getOrDefault("q", ""));
+            case "/worldindex/gear" -> {
+                List<String> args = new ArrayList<>();
+                args.add("--level"); args.add(q.getOrDefault("level", ""));
+                args.add("--job");   args.add(q.getOrDefault("job", ""));
+                String slot = q.get("slot");
+                if (slot != null && !slot.isBlank()) { args.add("--slot"); args.add(slot); }
+                json = WorldIndex.queryJson("gear", args.toArray(new String[0]));
+            }
+            default -> {
+                send(ex, 404, "{\"ok\":false,\"error\":\"not found\"}");
+                return;
+            }
+        }
+        if (json == null || json.isBlank()) json = "[]";
+        sendJson(ex, 200, json);
+    }
+
+    // -------------------------------------------------------------------------
+    // Character inventory browsing + item granting (online live / offline DB).
+    // -------------------------------------------------------------------------
+
+    /**
+     * GET  /characters?q=<name>            → search chars (online + DB), ~25 results
+     * GET  /characters/{id}/inventory      → list a char's items (live if online, else DB)
+     * POST /characters/{id}/items          body {"itemId":int,"quantity":int} → give an item
+     */
+    private static void handleCharacters(HttpExchange ex) throws IOException {
+        if (!checkAuth(ex)) return;
+        String method = ex.getRequestMethod().toUpperCase();
+        String path = ex.getRequestURI().getPath();
+        if (path.endsWith("/") && path.length() > 1) path = path.substring(0, path.length() - 1);
+
+        if ("GET".equals(method) && "/characters".equals(path)) {
+            handleCharacterSearch(ex);
+        } else if ("GET".equals(method) && path.matches("/characters/\\d+/inventory")) {
+            handleCharacterInventory(ex, extractIdFromPath(path, 1));
+        } else if ("POST".equals(method) && path.matches("/characters/\\d+/items")) {
+            handleCharacterGiveItem(ex, extractIdFromPath(path, 1));
+        } else {
+            send(ex, 404, "{\"ok\":false,\"error\":\"not found\"}");
+        }
+    }
+
+    /** GET /characters?q=<name> → [{id,name,level,job,online}, ...] */
+    private static void handleCharacterSearch(HttpExchange ex) throws IOException {
+        Map<String, String> q = parseQuery(ex.getRequestURI().getQuery());
+        String term = q.getOrDefault("q", "").trim();
+
+        // id -> [name, level, job, online]
+        Map<Integer, Object[]> rows = new LinkedHashMap<>();
+
+        // Online players first (so they win on overlap and are flagged online).
+        for (World w : Server.getInstance().getWorlds()) {
+            for (Channel c : w.getChannels()) {
+                PlayerStorage ps = c.getPlayerStorage();
+                if (ps == null) continue;
+                for (Character chr : ps.getAllCharacters()) {
+                    if (chr == null) continue;
+                    if (!term.isEmpty() && !chr.getName().toLowerCase().contains(term.toLowerCase())) continue;
+                    rows.putIfAbsent(chr.getId(),
+                            new Object[]{chr.getName(), chr.getLevel(), chr.getJob().getId(), Boolean.TRUE});
+                    if (rows.size() >= 25) break;
+                }
+            }
+        }
+
+        // Fill remaining slots from the DB.
+        if (rows.size() < 25) {
+            String sql = "SELECT id,name,level,job FROM characters WHERE name LIKE ? ORDER BY name LIMIT 25";
+            try (Connection con = DatabaseConnection.getConnection();
+                 PreparedStatement psq = con.prepareStatement(sql)) {
+                psq.setString(1, "%" + term + "%");
+                try (ResultSet rs = psq.executeQuery()) {
+                    while (rs.next() && rows.size() < 25) {
+                        int id = rs.getInt("id");
+                        if (rows.containsKey(id)) continue;
+                        rows.put(id, new Object[]{rs.getString("name"), rs.getInt("level"),
+                                rs.getInt("job"), Boolean.FALSE});
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("character search DB query failed: {}", e.toString());
+            }
+        }
+
+        StringBuilder sb = new StringBuilder(rows.size() * 64 + 2);
+        sb.append('[');
+        boolean first = true;
+        for (Map.Entry<Integer, Object[]> e : rows.entrySet()) {
+            if (!first) sb.append(',');
+            first = false;
+            Object[] r = e.getValue();
+            sb.append("{\"id\":").append(e.getKey());
+            sb.append(",\"name\":\"").append(jsonEscape((String) r[0])).append("\"");
+            sb.append(",\"level\":").append((int) r[1]);
+            sb.append(",\"job\":").append((int) r[2]);
+            sb.append(",\"online\":").append((boolean) r[3]);
+            sb.append("}");
+        }
+        sb.append(']');
+        sendJson(ex, 200, sb.toString());
+    }
+
+    /** GET /characters/{id}/inventory */
+    private static void handleCharacterInventory(HttpExchange ex, int charId) throws IOException {
+        Character online = findOnlineCharById(charId);
+        ItemInformationProvider ii = ItemInformationProvider.getInstance();
+
+        if (online != null) {
+            StringBuilder sb = new StringBuilder(512);
+            sb.append("{\"ok\":true,\"online\":true,\"items\":[");
+            boolean first = true;
+            InventoryType[] types = {InventoryType.EQUIP, InventoryType.USE, InventoryType.SETUP,
+                    InventoryType.ETC, InventoryType.CASH, InventoryType.EQUIPPED};
+            for (InventoryType type : types) {
+                Inventory inv = online.getInventory(type);
+                if (inv == null) continue;
+                for (Item it : inv.list()) {
+                    if (!first) sb.append(',');
+                    first = false;
+                    boolean equip = (it instanceof Equip);
+                    sb.append("{\"inventoryType\":\"").append(type.name()).append("\"");
+                    sb.append(",\"position\":").append(it.getPosition());
+                    sb.append(",\"itemId\":").append(it.getItemId());
+                    sb.append(",\"name\":\"").append(jsonEscape(ii.getName(it.getItemId()))).append("\"");
+                    sb.append(",\"quantity\":").append(it.getQuantity());
+                    sb.append(",\"equip\":").append(equip);
+                    sb.append("}");
+                }
+            }
+            sb.append("]}");
+            sendJson(ex, 200, sb.toString());
+            return;
+        }
+
+        // Offline: must exist in the characters table.
+        if (!charExistsInDb(charId)) {
+            send(ex, 404, "{\"ok\":false,\"error\":\"character not found\"}");
+            return;
+        }
+        StringBuilder sb = new StringBuilder(512);
+        sb.append("{\"ok\":true,\"online\":false,\"items\":[");
+        String sql = "SELECT inventorytype,position,itemid,quantity FROM inventoryitems " +
+                "WHERE characterid=? ORDER BY inventorytype,position";
+        try (Connection con = DatabaseConnection.getConnection();
+             PreparedStatement ps = con.prepareStatement(sql)) {
+            ps.setInt(1, charId);
+            try (ResultSet rs = ps.executeQuery()) {
+                boolean first = true;
+                while (rs.next()) {
+                    if (!first) sb.append(',');
+                    first = false;
+                    int invType = rs.getInt("inventorytype");
+                    int itemId = rs.getInt("itemid");
+                    boolean equip = (invType == InventoryType.EQUIP.getType()
+                            || invType == InventoryType.EQUIPPED.getType());
+                    InventoryType t = InventoryType.getByType((byte) invType);
+                    sb.append("{\"inventoryType\":\"").append(t.name()).append("\"");
+                    sb.append(",\"position\":").append(rs.getInt("position"));
+                    sb.append(",\"itemId\":").append(itemId);
+                    sb.append(",\"name\":\"").append(jsonEscape(ii.getName(itemId))).append("\"");
+                    sb.append(",\"quantity\":").append(rs.getInt("quantity"));
+                    sb.append(",\"equip\":").append(equip);
+                    sb.append("}");
+                }
+            }
+        } catch (Exception e) {
+            log.warn("character inventory DB query failed for {}: {}", charId, e.toString());
+            send(ex, 500, "{\"ok\":false,\"error\":\"db query failed\"}");
+            return;
+        }
+        sb.append("]}");
+        sendJson(ex, 200, sb.toString());
+    }
+
+    /** POST /characters/{id}/items body {"itemId":int,"quantity":int} */
+    private static void handleCharacterGiveItem(HttpExchange ex, int charId) throws IOException {
+        String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+        Integer itemIdBox = extractIntField(body, "itemId");
+        if (itemIdBox == null) {
+            send(ex, 400, "{\"ok\":false,\"error\":\"body must include {\\\"itemId\\\":int}\"}");
+            return;
+        }
+        int itemId = itemIdBox;
+        Integer qtyBox = extractIntField(body, "quantity");
+        int quantity = (qtyBox == null) ? 1 : qtyBox;
+        if (quantity < 1) {
+            send(ex, 400, "{\"ok\":false,\"error\":\"quantity must be >= 1\"}");
+            return;
+        }
+        ItemInformationProvider ii = ItemInformationProvider.getInstance();
+        String itemName = ii.getName(itemId);
+        if (itemName == null) itemName = "item " + itemId;
+
+        Character online = findOnlineCharById(charId);
+        if (online != null) {
+            final Client client = online.getClient();
+            final AtomicBoolean result = new AtomicBoolean(false);
+            final CountDownLatch latch = new CountDownLatch(1);
+            TimerManager.getInstance().schedule(() -> {
+                try {
+                    boolean ok = InventoryManipulator.addById(client, itemId, (short) quantity,
+                            online.getName(), -1, (short) 0, -1L);
+                    result.set(ok);
+                } catch (Exception e) {
+                    log.warn("live addById failed for char {}: {}", charId, e.toString());
+                } finally {
+                    latch.countDown();
+                }
+            }, 0L);
+            boolean completed;
+            try {
+                completed = latch.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                completed = false;
+            }
+            if (!completed) {
+                send(ex, 200, "{\"ok\":false,\"error\":\"game-thread timeout\"}");
+                return;
+            }
+            if (!result.get()) {
+                send(ex, 200, "{\"ok\":false,\"error\":\"inventory full or add failed\"}");
+                return;
+            }
+            String msg = "gave " + quantity + "x " + itemName + " to " + online.getName() + " (live)";
+            send(ex, 200, "{\"ok\":true,\"mode\":\"live\",\"message\":\"" + jsonEscape(msg) + "\"}");
+            return;
+        }
+
+        // Offline: insert into the DB.
+        if (!charExistsInDb(charId)) {
+            send(ex, 404, "{\"ok\":false,\"error\":\"character not found\"}");
+            return;
+        }
+        try {
+            String charName = giveItemOffline(charId, itemId, quantity, ii);
+            String msg = "inserted " + quantity + "x " + itemName + " into " + charName + "'s DB (offline)";
+            send(ex, 200, "{\"ok\":true,\"mode\":\"db\",\"message\":\"" + jsonEscape(msg) + "\"}");
+        } catch (Exception e) {
+            log.warn("offline item insert failed for char {}: {}", charId, e.toString());
+            send(ex, 500, "{\"ok\":false,\"error\":\"db insert failed\"}");
+        }
+    }
+
+    /** Insert an item directly into a character's DB inventory; returns the char's name. */
+    private static String giveItemOffline(int charId, int itemId, int quantity, ItemInformationProvider ii)
+            throws Exception {
+        InventoryType type = ItemConstants.getInventoryType(itemId);
+        byte invType = type.getType();
+        boolean equip = (invType == InventoryType.EQUIP.getType()) || ItemConstants.isEquipment(itemId);
+        if (equip) invType = InventoryType.EQUIP.getType();
+
+        String charName = "char " + charId;
+        try (Connection con = DatabaseConnection.getConnection()) {
+            try (PreparedStatement ps = con.prepareStatement("SELECT name FROM characters WHERE id=?")) {
+                ps.setInt(1, charId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) charName = rs.getString("name");
+                }
+            }
+            int nextSlot = nextSlot(con, charId, invType);
+
+            String insItem = "INSERT INTO inventoryitems " +
+                    "(type,characterid,accountid,itemid,inventorytype,position,quantity,owner,petid,flag,expiration,giftFrom) " +
+                    "VALUES (?,?,NULL,?,?,?,?,?,?,?,?,?)";
+            try (PreparedStatement ps = con.prepareStatement(insItem, Statement.RETURN_GENERATED_KEYS)) {
+                // `type` is the ItemFactory scope discriminator: 1 = INVENTORY (character-scoped),
+                // matching ItemFactory.INVENTORY. It is NOT the inventory type.
+                ps.setInt(1, ItemFactory.INVENTORY.getValue());
+                ps.setInt(2, charId);
+                ps.setInt(3, itemId);
+                ps.setInt(4, invType);
+                ps.setInt(5, nextSlot);
+                ps.setInt(6, equip ? 1 : quantity);
+                ps.setString(7, "");
+                ps.setInt(8, -1);
+                ps.setInt(9, 0);
+                ps.setLong(10, -1L);
+                ps.setString(11, "");
+                ps.executeUpdate();
+
+                if (equip) {
+                    int invItemId;
+                    try (ResultSet gk = ps.getGeneratedKeys()) {
+                        if (!gk.next()) throw new IllegalStateException("no generated key for inventoryitems");
+                        invItemId = gk.getInt(1);
+                    }
+                    Equip eq = (Equip) ii.getEquipById(itemId);
+                    String insEquip = "INSERT INTO inventoryequipment " +
+                            "(inventoryitemid,upgradeslots,level,str,dex,`int`,luk,hp,mp,watk,matk,wdef,mdef,acc,avoid,hands,speed,jump,locked,vicious,itemlevel,itemexp,ringid) " +
+                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+                    try (PreparedStatement pe = con.prepareStatement(insEquip)) {
+                        pe.setInt(1, invItemId);
+                        pe.setInt(2, eq.getUpgradeSlots());
+                        pe.setInt(3, eq.getLevel());
+                        pe.setInt(4, eq.getStr());
+                        pe.setInt(5, eq.getDex());
+                        pe.setInt(6, eq.getInt());
+                        pe.setInt(7, eq.getLuk());
+                        pe.setInt(8, eq.getHp());
+                        pe.setInt(9, eq.getMp());
+                        pe.setInt(10, eq.getWatk());
+                        pe.setInt(11, eq.getMatk());
+                        pe.setInt(12, eq.getWdef());
+                        pe.setInt(13, eq.getMdef());
+                        pe.setInt(14, eq.getAcc());
+                        pe.setInt(15, eq.getAvoid());
+                        pe.setInt(16, eq.getHands());
+                        pe.setInt(17, eq.getSpeed());
+                        pe.setInt(18, eq.getJump());
+                        pe.setInt(19, 0);                 // locked
+                        pe.setInt(20, eq.getVicious());
+                        pe.setInt(21, eq.getItemLevel());
+                        pe.setInt(22, 0);                 // itemexp
+                        pe.setInt(23, eq.getRingId());
+                        pe.executeUpdate();
+                    }
+                }
+            }
+        }
+        return charName;
+    }
+
+    /** Next free slot (1-based) for a character's inventory type. */
+    private static int nextSlot(Connection con, int charId, int invType) throws Exception {
+        String sql = "SELECT COALESCE(MAX(position),0)+1 FROM inventoryitems WHERE characterid=? AND inventorytype=?";
+        try (PreparedStatement ps = con.prepareStatement(sql)) {
+            ps.setInt(1, charId);
+            ps.setInt(2, invType);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 1;
+            }
+        }
+    }
+
+    /** Find an online character by id across all worlds/channels, or null. */
+    private static Character findOnlineCharById(int charId) {
+        for (World w : Server.getInstance().getWorlds()) {
+            for (Channel c : w.getChannels()) {
+                PlayerStorage ps = c.getPlayerStorage();
+                if (ps == null) continue;
+                Character chr = ps.getCharacterById(charId);
+                if (chr != null) return chr;
+            }
+        }
+        return null;
+    }
+
+    /** True if a character id exists in the characters table. */
+    private static boolean charExistsInDb(int charId) {
+        try (Connection con = DatabaseConnection.getConnection();
+             PreparedStatement ps = con.prepareStatement("SELECT 1 FROM characters WHERE id=?")) {
+            ps.setInt(1, charId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        } catch (Exception e) {
+            log.warn("charExistsInDb failed for {}: {}", charId, e.toString());
+            return false;
+        }
+    }
+
+    /** Parse a URL query string into a map of URL-decoded key/value pairs. */
+    private static Map<String, String> parseQuery(String query) {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (query == null || query.isEmpty()) return out;
+        for (String pair : query.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq < 0) {
+                out.put(urlDecode(pair), "");
+            } else {
+                out.put(urlDecode(pair.substring(0, eq)), urlDecode(pair.substring(eq + 1)));
+            }
+        }
+        return out;
+    }
+
+    private static String urlDecode(String s) {
+        try { return URLDecoder.decode(s, StandardCharsets.UTF_8); }
+        catch (Exception e) { return s; }
+    }
+
+    /** Send a body that is already JSON (no re-escaping). */
+    private static void sendJson(HttpExchange ex, int status, String json) throws IOException {
+        send(ex, status, json);
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
 
@@ -484,7 +929,7 @@ public final class BotControlApi {
         int colon = json.indexOf(':', k + needle.length());
         if (colon < 0) return null;
         int i = colon + 1;
-        while (i < json.length() && Character.isWhitespace(json.charAt(i))) i++;
+        while (i < json.length() && java.lang.Character.isWhitespace(json.charAt(i))) i++;
         if (i >= json.length() || json.charAt(i) != '"') return null;
         i++;
         StringBuilder out = new StringBuilder();
@@ -520,9 +965,9 @@ public final class BotControlApi {
         int colon = json.indexOf(':', k + needle.length());
         if (colon < 0) return null;
         int i = colon + 1;
-        while (i < json.length() && Character.isWhitespace(json.charAt(i))) i++;
+        while (i < json.length() && java.lang.Character.isWhitespace(json.charAt(i))) i++;
         int start = i;
-        while (i < json.length() && (Character.isDigit(json.charAt(i)) || json.charAt(i) == '-')) i++;
+        while (i < json.length() && (java.lang.Character.isDigit(json.charAt(i)) || json.charAt(i) == '-')) i++;
         if (i == start) return null;
         try { return Integer.parseInt(json.substring(start, i)); } catch (NumberFormatException e) { return null; }
     }
@@ -536,7 +981,7 @@ public final class BotControlApi {
         int colon = json.indexOf(':', k + needle.length());
         if (colon < 0) return null;
         int i = colon + 1;
-        while (i < json.length() && Character.isWhitespace(json.charAt(i))) i++;
+        while (i < json.length() && java.lang.Character.isWhitespace(json.charAt(i))) i++;
         if (json.startsWith("true", i)) return Boolean.TRUE;
         if (json.startsWith("false", i)) return Boolean.FALSE;
         return null;
